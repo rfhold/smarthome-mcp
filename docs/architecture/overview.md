@@ -15,7 +15,7 @@
 
 ## Request Flow
 
-1. Kuri validates a locally issued token bound to `/mcp` and scope `mcp:read`.
+1. Kuri validates a locally issued token bound to `/mcp` and scope `mcp:use`.
 2. The progressive server validates the selected `home_assistant_query` action.
 3. The integration acquires one of four non-waiting operation permits.
 4. It opens a bounded Home Assistant WebSocket, authenticates, and requests `homeassistant/expose_entity/list`.

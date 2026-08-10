@@ -1,6 +1,6 @@
 # List Entities
 
-`list_entities` reads `GET /api/states`, discards entities not explicitly exposed to the conversation assistant, normalizes approved fields, filters, sorts by entity ID, and applies the limit.
+`entity.list` reads `GET /api/states`, discards entities not explicitly exposed to the conversation assistant, normalizes approved fields, filters, sorts by entity ID, and applies the limit.
 
 | Input | Contract |
 | --- | --- |

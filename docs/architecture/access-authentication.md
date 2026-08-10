@@ -16,7 +16,7 @@ The resource value has exact-string semantics. Alternate origins, paths, query s
 
 Each `/mcp` request stands alone after token validation. The service requires no MCP session identifier and stores no MCP protocol session state.
 
-Every MCP request must use a locally issued ES256 JWT access token. Each token must use JWT type `at+jwt` and contain scope `mcp:read`.
+Every MCP request must use a locally issued ES256 JWT access token. Each token must use JWT type `at+jwt` and contain scope `mcp:use`.
 
 Authentik provides browser identity only. Authentik access tokens, ID tokens, and other Authentik credentials never authorize `/mcp`.
 
@@ -36,7 +36,7 @@ The service must publish protected-resource and authorization-server metadata fo
 
 An unauthenticated `/mcp` request must return HTTP 401. Its `WWW-Authenticate` header must use the `Bearer` scheme and a `resource_metadata` parameter with the absolute protected-resource metadata URL.
 
-An invalid, expired, or incorrectly bound token must return HTTP 401 with Bearer error `invalid_token`. A valid token without `mcp:read` must return HTTP 403 with Bearer error `insufficient_scope` and scope `mcp:read`.
+An invalid, expired, or incorrectly bound token must return HTTP 401 with Bearer error `invalid_token`. A valid token without `mcp:use` must return HTTP 403 with Bearer error `insufficient_scope` and scope `mcp:use`.
 
 Challenges and OAuth errors must not include tokens, authorization codes, client secrets, signing material, or OIDC transaction values.
 
@@ -64,9 +64,11 @@ PostgreSQL persists only digests for state and correlation values. A secure tran
 
 The callback verifies state, nonce, PKCE, signature, issuer, audience, expiration, and authorization response integrity. Transaction completion is atomic and single-use.
 
-`smarthome-mcp` supplies Authentik configuration and stable issuer-plus-subject principal mapping. It does not own OIDC transaction persistence or callback protocol logic.
+`smarthome-mcp` requests the `openid profile email` scopes from Authentik and provisions their managed property mappings. It uses only the verified issuer and subject for principal identity.
 
-After successful authentication, hosted continuation approves only the configured `/mcp` resource and `mcp:read` scope. It rejects any different resource or scope.
+`smarthome-mcp` does not own OIDC transaction persistence or callback protocol logic.
+
+After successful authentication, hosted continuation approves only the configured `/mcp` resource and `mcp:use` scope. It rejects any different resource or scope.
 
 Authentik session lifetime does not extend local authorization codes, access tokens, refresh generations, or OIDC transactions.
 
@@ -90,7 +92,7 @@ The local issuer signs access tokens with ES256. Each access token must:
 - identify the configured local issuer exactly;
 - bind its audience to the exact configured `/mcp` resource;
 - remain within its validity interval; and
-- contain `mcp:read` as an independently matched scope value.
+- contain `mcp:use` as an independently matched scope value.
 
 The `/mcp` boundary must validate the signature, algorithm, token type, issuer, exact audience, time claims, and scope before MCP request handling.
 

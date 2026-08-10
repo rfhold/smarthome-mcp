@@ -119,11 +119,11 @@ impl HomeAssistantClient {
 
     pub(crate) async fn list_entities(&self, query: &EntitiesQuery) -> Result<Value, Error> {
         let _permit = self.admit()?;
-        let mut metrics = MetricsGuard::new("list_entities");
+        let mut metrics = MetricsGuard::new("entity.list");
         let span = tracing::info_span!(
             target: "smarthome_mcp::home_assistant",
             "home_assistant.query",
-            action = "list_entities",
+            action = "entity.list",
             outcome = tracing::field::Empty,
         );
         let result = tokio::time::timeout(self.timeout, async {
@@ -153,7 +153,7 @@ impl HomeAssistantClient {
             let truncated = entities.len() > query.limit;
             entities.truncate(query.limit);
             bounded_output(json!({
-                "action": "list_entities",
+                "action": "entity.list",
                 "entities": entities,
                 "truncated": truncated,
             }))
@@ -169,11 +169,11 @@ impl HomeAssistantClient {
 
     pub(crate) async fn get_states(&self, query: &StatesQuery) -> Result<Value, Error> {
         let _permit = self.admit()?;
-        let mut metrics = MetricsGuard::new("get_states");
+        let mut metrics = MetricsGuard::new("state.get");
         let span = tracing::info_span!(
             target: "smarthome_mcp::home_assistant",
             "home_assistant.query",
-            action = "get_states",
+            action = "state.get",
             outcome = tracing::field::Empty,
         );
         let result = tokio::time::timeout(self.timeout, async {
@@ -189,7 +189,7 @@ impl HomeAssistantClient {
                 }
                 states.push(state);
             }
-            bounded_output(json!({"action": "get_states", "entities": states}))
+            bounded_output(json!({"action": "state.get", "entities": states}))
         })
         .instrument(span.clone())
         .await
@@ -202,11 +202,11 @@ impl HomeAssistantClient {
 
     pub(crate) async fn get_history(&self, query: &HistoryQuery) -> Result<Value, Error> {
         let _permit = self.admit()?;
-        let mut metrics = MetricsGuard::new("get_history");
+        let mut metrics = MetricsGuard::new("history.get");
         let span = tracing::info_span!(
             target: "smarthome_mcp::home_assistant",
             "home_assistant.query",
-            action = "get_history",
+            action = "history.get",
             outcome = tracing::field::Empty,
         );
         let result = tokio::time::timeout(self.timeout, async {
@@ -262,7 +262,7 @@ impl HomeAssistantClient {
                 }
             }
             bounded_output(json!({
-                "action": "get_history",
+                "action": "history.get",
                 "start": query.start.to_rfc3339(),
                 "end": query.end.to_rfc3339(),
                 "history": history,
@@ -612,6 +612,7 @@ mod tests {
 
         for _ in 0..2 {
             let result = client.list_entities(&query).await.unwrap();
+            assert_eq!(result["action"], "entity.list");
             assert_eq!(result["entities"].as_array().unwrap().len(), 1);
             assert_eq!(result["entities"][0]["entity_id"], "sensor.allowed");
             assert_eq!(result["entities"][0]["friendly_name"], "Kitchen");
@@ -686,6 +687,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_states_returns_the_public_action_name() {
+        let mock = MockHomeAssistant::new(
+            exposure(&[("sensor.allowed", true)]),
+            json!([raw_state("sensor.allowed", "21", "Kitchen")]),
+            json!([]),
+        );
+        let (origin, server) = serve(mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        let result = client
+            .get_states(&StatesQuery {
+                entity_ids: vec!["sensor.allowed".to_owned()],
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result["action"], "state.get");
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn malformed_exposure_response_fails_closed() {
         let mock = MockHomeAssistant::new(
             json!({"id":2,"type":"result","success":true,"result":{"exposed_entities":{}}}),
@@ -737,6 +762,7 @@ mod tests {
         };
 
         let result = client.get_history(&query).await.unwrap();
+        assert_eq!(result["action"], "history.get");
         assert_eq!(result["history"][0]["entity_id"], "sensor.allowed");
         assert_eq!(result["history"][0]["states"][0]["state"], "20");
         assert!(

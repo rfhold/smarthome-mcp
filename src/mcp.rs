@@ -64,14 +64,17 @@ pub fn router(
             "destructiveHint": false,
             "idempotentHint": true,
             "openWorldHint": true
-        })
+        }),
+        namespace(entity, description = "Query Home Assistant entities."),
+        namespace(state, description = "Query Home Assistant current states."),
+        namespace(history, description = "Query Home Assistant state history.")
     )
 )]
 impl SmarthomeMcp {
     /// List current states for entities explicitly exposed to Home Assistant's
     /// conversation assistant. Results may be searched, filtered by domain,
     /// and are deterministically limited.
-    #[action(tool = "home_assistant_query", name = "list_entities")]
+    #[action(tool = "home_assistant_query", name = "entity.list")]
     async fn list_entities(
         &self,
         input: ListEntitiesInput,
@@ -98,7 +101,7 @@ impl SmarthomeMcp {
 
     /// Get normalized current states for up to 25 explicit entity IDs. Every
     /// requested entity must currently be explicitly exposed to Assist.
-    #[action(tool = "home_assistant_query", name = "get_states")]
+    #[action(tool = "home_assistant_query", name = "state.get")]
     async fn get_states(
         &self,
         input: GetStatesInput,
@@ -125,7 +128,7 @@ impl SmarthomeMcp {
 
     /// Get minimal significant state history for up to 10 explicit entity IDs
     /// over no more than 24 hours. Arbitrary attributes are never returned.
-    #[action(tool = "home_assistant_query", name = "get_history")]
+    #[action(tool = "home_assistant_query", name = "history.get")]
     async fn get_history(
         &self,
         input: GetHistoryInput,
@@ -257,7 +260,7 @@ mod tests {
                 "call",
                 json!({
                     "name": TOOL_NAME,
-                    "arguments": {"action":"get_states", "input":{"entity_ids":[]}}
+                    "arguments": {"action":"state.get", "input":{"entity_ids":[]}}
                 }),
             ),
         )
@@ -267,6 +270,78 @@ mod tests {
             "invalid_arguments"
         );
         assert_eq!(response["result"]["isError"], true);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn generated_help_and_schema_use_only_dotted_actions() {
+        let (endpoint, task) = endpoint().await;
+        let (_, response) = post(
+            &endpoint,
+            request(
+                "tools/call",
+                "help",
+                json!({"name": TOOL_NAME, "arguments":{"action":"help"}}),
+            ),
+        )
+        .await;
+        let serialized = serde_json::to_string(&response).unwrap();
+        for namespace_help in ["help.entity", "help.state", "help.history"] {
+            assert!(serialized.contains(namespace_help));
+        }
+        for legacy in ["list_entities", "get_states", "get_history"] {
+            assert!(!serialized.contains(legacy));
+        }
+        for (namespace_help, action) in [
+            ("help.entity", "entity.list"),
+            ("help.state", "state.get"),
+            ("help.history", "history.get"),
+        ] {
+            let (_, help) = post(
+                &endpoint,
+                request(
+                    "tools/call",
+                    namespace_help,
+                    json!({"name": TOOL_NAME, "arguments":{"action":namespace_help}}),
+                ),
+            )
+            .await;
+            assert_eq!(
+                help["result"]["structuredContent"]["actions"][0]["action"],
+                action
+            );
+        }
+
+        let (_, discovery) = post(&endpoint, request("tools/list", "list", json!({}))).await;
+        let schema =
+            serde_json::to_string(&discovery["result"]["tools"][0]["inputSchema"]).unwrap();
+        for action in ["entity.list", "state.get", "history.get"] {
+            assert!(schema.contains(action));
+        }
+        for legacy in ["list_entities", "get_states", "get_history"] {
+            assert!(!schema.contains(legacy));
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn legacy_action_names_are_rejected() {
+        let (endpoint, task) = endpoint().await;
+        for legacy in ["list_entities", "get_states", "get_history"] {
+            let (_, response) = post(
+                &endpoint,
+                request(
+                    "tools/call",
+                    legacy,
+                    json!({"name": TOOL_NAME, "arguments":{"action":legacy,"input":{}}}),
+                ),
+            )
+            .await;
+            assert!(
+                response.get("error").is_some(),
+                "accepted legacy action {legacy}"
+            );
+        }
         task.abort();
     }
 }

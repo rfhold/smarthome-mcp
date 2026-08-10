@@ -12,4 +12,4 @@ Home Assistant operations emit `home_assistant.query` spans and these metrics:
 
 Action and outcome values pass through fixed allowlists. Cancellation finalizes in-flight telemetry through RAII. No signal records entity IDs, names, states, attributes, search text, history times, bearer tokens, upstream URLs, response bodies, or raw errors.
 
-Only `smarthome_mcp` and `smarthome_mcp::*` tracing targets are admitted. Dependency events remain suppressed even under permissive `RUST_LOG` settings.
+Only the exact `smarthome_mcp`, `smarthome_mcp::*`, `mcp`, and `mcp::*` tracing target trees are admitted. Other dependency events remain suppressed even under permissive `RUST_LOG` settings.

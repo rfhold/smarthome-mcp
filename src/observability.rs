@@ -161,11 +161,15 @@ fn resource(config: &TelemetryConfig) -> Resource {
 }
 
 fn configured_env_filter() -> EnvFilter {
-    EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("smarthome_mcp=info"))
+    EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| EnvFilter::new("smarthome_mcp=info,mcp=info"))
 }
 
 fn allowed_target(target: &str) -> bool {
-    target == "smarthome_mcp" || target.starts_with("smarthome_mcp::")
+    target == "smarthome_mcp"
+        || target.starts_with("smarthome_mcp::")
+        || target == "mcp"
+        || target.starts_with("mcp::")
 }
 
 fn trace_metadata_allowed(metadata: &Metadata<'_>) -> bool {
@@ -348,7 +352,7 @@ mod tests {
 
     #[test]
     fn target_allowlist_cannot_be_bypassed_by_permissive_levels() {
-        for target in ["smarthome_mcp", "smarthome_mcp::app"] {
+        for target in ["smarthome_mcp", "smarthome_mcp::app", "mcp", "mcp::server"] {
             assert!(allowed_target(target));
         }
         for target in [
@@ -373,7 +377,10 @@ mod tests {
             tracing::info!(target: "mcp::server", "owned MCP event");
             tracing::info!(target: "opentelemetry_otlp", "unsafe exporter event");
         });
-        assert_eq!(*captured.lock().unwrap(), ["smarthome_mcp::app"]);
+        assert_eq!(
+            *captured.lock().unwrap(),
+            ["smarthome_mcp::app", "mcp::server"]
+        );
     }
 
     #[test]
@@ -385,8 +392,8 @@ mod tests {
         tracing::subscriber::with_default(subscriber, || {
             tracing::error!(target: "smarthome_mcp", "owned error");
             tracing::warn!(target: "smarthome_mcp::app", "owned warning");
-            tracing::info!(target: "mcp", "excluded dependency info");
-            tracing::info!(target: "mcp::server", "excluded dependency info");
+            tracing::info!(target: "mcp", "owned MCP info");
+            tracing::info!(target: "mcp::server", "owned MCP server info");
             tracing::debug!(target: "mcp::server", "excluded MCP debug");
             tracing::trace!(target: "smarthome_mcp::app", "excluded application trace");
             tracing::error!(target: "reqwest", "excluded dependency error");
@@ -394,7 +401,7 @@ mod tests {
         });
         assert_eq!(
             *captured.lock().unwrap(),
-            ["smarthome_mcp", "smarthome_mcp::app"]
+            ["smarthome_mcp", "smarthome_mcp::app", "mcp", "mcp::server"]
         );
     }
 

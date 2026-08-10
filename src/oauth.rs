@@ -268,7 +268,7 @@ mod tests {
     async fn consent_only_approves_the_exact_resource_and_scope() {
         let consent = AutoApproveConsent {
             resource: "https://mcp.example/mcp".to_owned(),
-            scope: "mcp:read".to_owned(),
+            scope: "mcp:use".to_owned(),
         };
         let model = |resource: &str, scopes: &[&str]| OAuthConsentModel {
             client_id: "client".to_owned(),
@@ -281,13 +281,13 @@ mod tests {
 
         assert!(matches!(
             consent
-                .present(model("https://mcp.example/mcp", &["mcp:read"]))
+                .present(model("https://mcp.example/mcp", &["mcp:use"]))
                 .await,
             OAuthConsentPresentation::Approved
         ));
         assert!(matches!(
             consent
-                .present(model("https://mcp.example/mcp", &["mcp:read", "admin"]))
+                .present(model("https://mcp.example/mcp", &["mcp:use", "admin"]))
                 .await,
             OAuthConsentPresentation::Response(_)
         ));

@@ -21,7 +21,7 @@ Tests cover:
 - JSON trace/span correlation, bounded routes, and safe completion events;
 - total telemetry bypass for `/health` and `/ready`;
 - cancellation-safe host and Home Assistant in-flight metrics;
-- fixed trace admission for application-owned `smarthome_mcp` targets independent of `RUST_LOG`;
+- fixed trace admission for the `smarthome_mcp` and `mcp` target trees independent of `RUST_LOG`;
 - bounded Pyroscope tags and cleanup outcomes;
 - exact Home Assistant metric names with allowlisted action and outcome labels;
 - deployment environment and downward API wiring; and

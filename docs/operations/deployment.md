@@ -4,7 +4,7 @@
 
 Preview was first deployed from commit `cb02f24` on 2026-08-10 by PipelineRun `smarthome-mcp-preview-r8hf7`. All seven pipeline tasks succeeded. The resulting Deployment was ready at one replica, CloudNativePG reported a healthy cluster, and the HTTPRoute reported accepted and resolved references. Production remains declaration-only, although its Home Assistant Stashes have been seeded.
 
-Bounded public smoke checks returned HTTP 200 from `/health` and `/ready`. An unauthenticated MCP initialize request returned HTTP 401 with the expected protected-resource metadata URL and `mcp:read` scope, and both OAuth metadata documents returned the configured preview resource and issuer. No authenticated tool invocation, browser OIDC flow, telemetry-backend delivery, backup restore, or production deployment is claimed.
+Bounded public smoke checks returned HTTP 200 from `/health` and `/ready`. An unauthenticated MCP initialize request returned HTTP 401 with the scope configured before this local contract change. Both OAuth metadata documents returned the configured preview resource and issuer. No live validation of `mcp:use`, an authenticated tool invocation, browser OIDC flow, telemetry-backend delivery, backup restore, or production deployment is claimed.
 
 ## Stack Targets
 
@@ -51,7 +51,7 @@ Seed each stack from its matching Waltr namespace before the first full update. 
 
 The Home Assistant client sends the token only as a REST bearer credential and as the WebSocket authentication message. Redirects and environment proxies are disabled for REST. Tool input cannot select the origin, path, headers, or credential.
 
-The service issues local ES256 access tokens and uses Authentik only for browser identity. `/mcp` accepts only locally issued tokens bound to the exact resource and `mcp:read` scope. PostgreSQL stores generic OAuth/OIDC state and wrapped signing material; the wrapping-key file uses a separate Secret and read-only mount.
+The service issues local ES256 access tokens and uses Authentik only for browser identity. The browser requests `openid profile email` through provisioned Authentik mappings. `/mcp` accepts only locally issued tokens bound to the exact resource and `mcp:use` scope. PostgreSQL stores generic OAuth/OIDC state and wrapped signing material; the wrapping-key file uses a separate Secret and read-only mount.
 
 Runtime logs, MCP results, redirects, image layers, Pulumi outputs, and health responses must not expose credentials or Home Assistant household data.
 
@@ -74,7 +74,7 @@ The Pulumi step requires `pulumi-credentials`, `authentik-credentials`, and `tek
 
 The runtime serves stateless MCP Streamable HTTP revision `2026-07-28` at exact resource `/mcp`. It supports DCR, hardened CIMD, and native loopback clients through PostgreSQL-backed OAuth state.
 
-One progressive read-only tool, `home_assistant_query`, exposes `list_entities`, `get_states`, and `get_history`. Each action performs a fresh Assist exposure lookup over Home Assistant WebSocket and permits only explicit `conversation: true` entries before using fixed REST endpoints. See the [Home Assistant specifications](../home-assistant/README.md).
+One progressive read-only tool, `home_assistant_query`, exposes `entity.list`, `state.get`, and `history.get`. Each action performs a fresh Assist exposure lookup over Home Assistant WebSocket and permits only explicit `conversation: true` entries before using fixed REST endpoints. See the [Home Assistant specifications](../home-assistant/README.md).
 
 Controls, service calls, native Home Assistant MCP bridging, and arbitrary HTTP access are not deployed capabilities.
 

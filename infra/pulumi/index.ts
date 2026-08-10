@@ -231,13 +231,19 @@ const signingKey = new authentik.CertificateKeyPair(
 const openid = authentik.getPropertyMappingProviderScopeOutput({
   managed: "goauthentik.io/providers/oauth2/scope-openid",
 });
+const profile = authentik.getPropertyMappingProviderScopeOutput({
+  managed: "goauthentik.io/providers/oauth2/scope-profile",
+});
+const email = authentik.getPropertyMappingProviderScopeOutput({
+  managed: "goauthentik.io/providers/oauth2/scope-email",
+});
 const browserApp = new OAuthApplication("smarthome-mcp-browser", {
   displayName: `${displayName} Browser`,
   slug: `${slug}-browser`,
   issuerBaseUrl: authentikBaseUrl,
   redirectUri: browserCallback,
   signingKeyId: signingKey.id,
-  propertyMappings: [openid.id],
+  propertyMappings: [openid.id, profile.id, email.id],
   launchUrl: publicUrl,
 });
 
@@ -314,10 +320,10 @@ const appSecret = new k8s.core.v1.Secret(
       SMARTHOME_MCP_OIDC_CLIENT_ID: browserApp.clientId,
       SMARTHOME_MCP_OIDC_CLIENT_SECRET: browserApp.clientSecret,
       SMARTHOME_MCP_OIDC_REDIRECT_URI: browserCallback,
-      SMARTHOME_MCP_OIDC_SCOPES: "openid",
+      SMARTHOME_MCP_OIDC_SCOPES: "openid profile email",
       SMARTHOME_MCP_OAUTH_ISSUER: mcpIssuer,
       SMARTHOME_MCP_OAUTH_RESOURCE: mcpResource,
-      SMARTHOME_MCP_OAUTH_REQUIRED_SCOPE: "mcp:read",
+      SMARTHOME_MCP_OAUTH_REQUIRED_SCOPE: "mcp:use",
       SMARTHOME_MCP_OAUTH_ACCESS_TOKEN_TTL: accessTokenTtl,
       SMARTHOME_MCP_OAUTH_REFRESH_TOKEN_TTL: refreshTokenTtl,
       SMARTHOME_MCP_OAUTH_REFRESH_FAMILY_TTL: refreshFamilyTtl,

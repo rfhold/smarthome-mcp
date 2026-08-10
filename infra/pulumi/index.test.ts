@@ -16,6 +16,7 @@ interface ResourceRecord {
 }
 
 const resources: ResourceRecord[] = [];
+const calls: ResourceRecord[] = [];
 const previousConfig = process.env.PULUMI_CONFIG;
 const previousSecretKeys = process.env.PULUMI_CONFIG_SECRET_KEYS;
 const previousHomeAssistantUrl = process.env.HOME_ASSISTANT_URL;
@@ -91,16 +92,19 @@ before(async () => {
         }
         return { id: `${args.name}-id`, state: outputs };
       },
-      call: (args) => ({
-        ...args.inputs,
-        id: "lookup-id",
-        propertyMappingProviderScopeId: "mapping-id",
-        data: {
-          BUCKET_NAME: "test-backup-bucket",
-          username: Buffer.from("app").toString("base64"),
-          password: Buffer.from("password").toString("base64"),
-        },
-      }),
+      call: (args) => {
+        calls.push({ type: args.token, name: args.token, inputs: args.inputs });
+        return {
+          ...args.inputs,
+          id: "lookup-id",
+          propertyMappingProviderScopeId: "mapping-id",
+          data: {
+            BUCKET_NAME: "test-backup-bucket",
+            username: Buffer.from("app").toString("base64"),
+            password: Buffer.from("password").toString("base64"),
+          },
+        };
+      },
     },
     "smarthome-mcp",
     "test",
@@ -235,7 +239,26 @@ describe("standalone resource topology", () => {
     const provider = oauthProviders[0].inputs;
     assert.equal(provider.clientType, "confidential");
     assert.notEqual(provider.clientSecret, undefined);
-    assert.deepEqual(provider.propertyMappings, ["lookup-id"]);
+    assert.deepEqual(provider.propertyMappings, [
+      "lookup-id",
+      "lookup-id",
+      "lookup-id",
+    ]);
+    assert.deepEqual(
+      calls
+        .filter((call) =>
+          String(call.inputs.managed).startsWith(
+            "goauthentik.io/providers/oauth2/scope-",
+          ),
+        )
+        .map((call) => call.inputs.managed)
+        .sort(),
+      [
+        "goauthentik.io/providers/oauth2/scope-email",
+        "goauthentik.io/providers/oauth2/scope-openid",
+        "goauthentik.io/providers/oauth2/scope-profile",
+      ],
+    );
     assert.deepEqual(provider.allowedRedirectUris, [
       {
         matching_mode: "strict",
@@ -260,9 +283,10 @@ describe("standalone resource topology", () => {
       "https://auth.example.test/application/o/smarthome-mcp-test-browser/",
     );
     assert.equal(app.SMARTHOME_MCP_OIDC_CLIENT_SECRET, "test-client-secret");
-    assert.equal(app.SMARTHOME_MCP_OIDC_SCOPES, "openid");
+    assert.equal(app.SMARTHOME_MCP_OIDC_SCOPES, "openid profile email");
     assert.equal(app.SMARTHOME_MCP_OAUTH_ISSUER, "https://smarthome-mcp.example.test/oauth");
     assert.equal(app.SMARTHOME_MCP_OAUTH_RESOURCE, "https://smarthome-mcp.example.test/mcp");
+    assert.equal(app.SMARTHOME_MCP_OAUTH_REQUIRED_SCOPE, "mcp:use");
     assert.equal(app.SMARTHOME_MCP_OAUTH_ALLOW_DCR, "true");
     assert.equal(app.SMARTHOME_MCP_OAUTH_ALLOW_CIMD, "true");
     assert.equal(

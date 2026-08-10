@@ -30,8 +30,8 @@ Run `git diff --check` before finalizing changes.
 | Layer | Implemented evidence |
 | --- | --- |
 | Configuration and host | Strict environment parsing, Home Assistant origin policy, keyring parsing, health, readiness, and cancellation-safe HTTP metrics. |
-| OAuth and OIDC seams | Exact resource/scope consent and stable issuer-plus-subject principal mapping. |
-| MCP contract | Progressive discovery, one read-only tool, annotations, schema validation, and safe semantic errors. |
+| OAuth and OIDC seams | Exact `mcp:use` resource consent, `openid profile email` configuration, and stable issuer-plus-subject principal mapping. |
+| MCP contract | Progressive discovery, dotted actions, legacy-action rejection, one read-only tool, annotations, schema validation, and safe semantic errors. |
 | Home Assistant inputs | Entity IDs, domain/search limits, entity counts, RFC3339 history ranges, defaults, and 24-hour cap. |
 | Home Assistant normalization | Approved state metadata only; arbitrary attributes are omitted. |
 | Home Assistant telemetry | Fixed action/outcome labels and cancellation-safe counters. |
@@ -57,7 +57,7 @@ Mock transport coverage should prove these properties without contacting a live 
 
 ## Hosted Access Contract
 
-Tests must cover the [access contract](../architecture/access-authentication.md), including exact `/mcp` resource binding, `mcp:read`, Bearer challenges, direct Authentik-token rejection, DCR, hardened CIMD, loopback redirects, PKCE, OIDC transaction single use, refresh rotation, and wrapped ES256 signing material.
+Tests must cover the [access contract](../architecture/access-authentication.md), including exact `/mcp` resource binding, `mcp:use`, Bearer challenges, direct Authentik-token rejection, DCR, hardened CIMD, loopback redirects, PKCE, OIDC transaction single use, refresh rotation, and wrapped ES256 signing material.
 
 Negative tests must verify that errors, logs, redirects, traces, and MCP content contain no credential or household data.
 
