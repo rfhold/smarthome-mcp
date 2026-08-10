@@ -1,0 +1,23 @@
+config:
+  kubernetes:context: pantheon
+  smarthome-mcp:namespace: smarthome-mcp-preview
+  smarthome-mcp:hostname: preview-smarthome-mcp.holdenitdown.net
+  smarthome-mcp:displayName: Smarthome MCP Preview
+  smarthome-mcp:slug: smarthome-mcp-preview
+  smarthome-mcp:authentikBaseUrl: https://auth.holdenitdown.net
+  smarthome-mcp:protectData: "false"
+  smarthome-mcp:storageClass: shared-fs
+  smarthome-mcp:databaseStorageSize: 10Gi
+  smarthome-mcp:backupStorageClass: default-bucket
+  smarthome-mcp:backupEndpoint: https://s3.pantheon.holdenitdown.net
+  smarthome-mcp:backupRetention: 14d
+  smarthome-mcp:backupSchedule: 0 0 2 * * *
+  smarthome-mcp:mcpOAuthAccessTokenTtl: "300"
+  smarthome-mcp:mcpOAuthRefreshTokenTtl: "86400"
+  smarthome-mcp:mcpOAuthRefreshFamilyTtl: "2592000"
+  smarthome-mcp:mcpOAuthCodeTtl: "300"
+  smarthome-mcp:mcpOAuthCimdTrustedPrivateOrigins:
+    - https://preview-kuri.holdenitdown.net
+  smarthome-mcp:mcpOAuthWrappingKeyVersions: [v1]
+  smarthome-mcp:mcpOAuthActiveWrappingKeyVersion: v1
+encryptionsalt: v1:JpursO2VfUY=:v1:b36ZTkbO7H7FZE0d:kQRTPgYHEdvYZTV5kFmLRAlYatccPg==

@@ -1,0 +1,56 @@
+# Contributing
+
+The repository implements hosted OAuth, authenticated MCP, and a bounded Home Assistant read integration. The generic Kuri `mcp` dependency uses a reviewed immutable Git revision.
+
+Use [docs/README.md](docs/README.md) to locate canonical contracts and current validation boundaries.
+
+## Local Commands
+
+Rust commands require Rust 1.96 because `Cargo.toml` sets `rust-version = "1.96"`. Rust 1.95 rejects the project before tests run.
+
+Run formatting, check, Clippy, and tests with Rust 1.96:
+
+```bash
+cargo +1.96.0 fmt --all -- --check
+cargo +1.96.0 check --locked --all-targets --all-features
+cargo +1.96.0 clippy --locked --all-targets --all-features -- -D warnings
+cargo +1.96.0 test --locked --all-features
+```
+
+These commands pass against the exact Kuri Git pin.
+
+Build the private-dependency runtime image with BuildKit secret handling:
+
+```bash
+DOCKER_BUILDKIT=1 docker build \
+  --build-arg REVISION=local \
+  --secret id=gitconfig,src="$HOME/.gitconfig" \
+  --secret id=git-credentials,src="$HOME/.git-credentials" \
+  --tag smarthome-mcp:local \
+  .
+```
+
+The secret source files must exist. BuildKit mounts them only for Cargo's fetch/build step.
+
+Run Pulumi type checks and mock tests:
+
+```bash
+cd infra/pulumi
+bun install --frozen-lockfile
+bun run build
+bun test index.test.ts
+```
+
+Do not treat a standalone `docker run` as a runtime smoke test. Startup requires PostgreSQL, an OAuth wrapping keyring, OIDC configuration, local OAuth settings, and Home Assistant credentials. See [the testing guide](docs/quality/testing.md) for current coverage.
+
+For documentation-only changes:
+
+1. Keep current state separate from planned behavior.
+2. Update the owning document and its domain index.
+3. Run `git diff --check`.
+4. Verify that every relative Markdown link resolves.
+5. Verify that every populated domain under `docs/` has a `README.md` index.
+
+Do not commit, push, preview, deploy, or mutate an external system without explicit authority.
+
+The `preview` stack is deployed by the main pipeline. The `prod` stack is initialized with zero resources. Do not run `pulumi preview` or `pulumi up` without explicit target-specific authority.

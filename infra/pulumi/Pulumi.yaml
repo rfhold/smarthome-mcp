@@ -1,0 +1,6 @@
+name: smarthome-mcp
+runtime:
+  name: nodejs
+  options:
+    packagemanager: bun
+description: Standalone smarthome-mcp deployment on Pantheon
