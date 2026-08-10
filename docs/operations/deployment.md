@@ -2,9 +2,9 @@
 
 ## Status
 
-The repository declares container, Pulumi, and preview-pipeline foundations. This new repository has no committed or deployed revision yet. Production remains declaration-only.
+Preview was first deployed from commit `cb02f24` on 2026-08-10 by PipelineRun `smarthome-mcp-preview-r8hf7`. All seven pipeline tasks succeeded. The resulting Deployment was ready at one replica, CloudNativePG reported a healthy cluster, and the HTTPRoute reported accepted and resolved references. Production remains declaration-only, although its Home Assistant Stashes have been seeded.
 
-No commit, push, pipeline execution, Pulumi preview, or deployment is implied by these files. Each external action requires separate target-specific approval.
+Bounded public smoke checks returned HTTP 200 from `/health` and `/ready`. An unauthenticated MCP initialize request returned HTTP 401 with the expected protected-resource metadata URL and `mcp:read` scope, and both OAuth metadata documents returned the configured preview resource and issuer. No authenticated tool invocation, browser OIDC flow, telemetry-backend delivery, backup restore, or production deployment is claimed.
 
 ## Stack Targets
 

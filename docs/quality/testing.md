@@ -2,7 +2,7 @@
 
 ## Status
 
-The local Rust and Pulumi suites pass under Rust 1.96 and Bun. They provide unit, generated MCP transport, normalization, configuration, hosted-auth seam, and mocked infrastructure evidence. They do not prove live Home Assistant, Authentik, PostgreSQL, container, pipeline, or deployed behavior.
+The local Rust and Pulumi suites pass under Rust 1.96 and Bun. They provide unit, generated MCP transport, normalization, configuration, hosted-auth seam, and mocked infrastructure evidence. The preview pipeline has also built and verified the multi-architecture image, applied the Pulumi stack, reached a ready workload and healthy PostgreSQL cluster, and passed public health, readiness, MCP challenge, and metadata smoke checks. This evidence does not prove an authenticated Home Assistant action, browser OIDC flow, telemetry-backend delivery, backup restoration, or production behavior.
 
 ## Commands
 
