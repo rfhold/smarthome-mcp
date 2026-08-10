@@ -445,7 +445,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn device_list_dispatches_and_rejects_unknown_input_fields() {
+    async fn device_list_dispatches_filters_and_rejects_unknown_input_fields() {
         let (home_assistant_origin, home_assistant_task) = home_assistant().await;
         let (endpoint, task) = endpoint_for(home_assistant_origin).await;
         let (_, dispatched) = post(
@@ -483,6 +483,28 @@ mod tests {
         assert_eq!(
             dispatched["result"]["content"][0]["text"],
             "Returned 1 devices item(s)."
+        );
+
+        let (_, filtered) = post(
+            &endpoint,
+            request(
+                "tools/call",
+                "device-filter",
+                json!({
+                    "name": TOOL_NAME,
+                    "arguments":{
+                        "action":"device.list",
+                        "input":{"limit":1},
+                        "filter":".devices[0].entities[0].entity_id"
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(filtered["result"]["structuredContent"], "sensor.allowed");
+        assert_eq!(
+            filtered["result"]["content"][0]["text"],
+            "\"sensor.allowed\""
         );
 
         let (_, rejected) = post(
