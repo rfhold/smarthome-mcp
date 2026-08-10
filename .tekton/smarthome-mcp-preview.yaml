@@ -274,16 +274,6 @@ spec:
                   value: /etc/kubeconfig/kubeconfig
                 - name: PULUMI_HOME
                   value: /tmp/pulumi-home
-                - name: HOME_ASSISTANT_URL
-                  valueFrom:
-                    configMapKeyRef:
-                      name: homeassistant-component-config
-                      key: HOME_ASSISTANT_URL
-                - name: HOME_ASSISTANT_TOKEN
-                  valueFrom:
-                    secretKeyRef:
-                      name: homeassistant-component-secret
-                      key: token
               envFrom:
                 - secretRef:
                     name: pulumi-credentials

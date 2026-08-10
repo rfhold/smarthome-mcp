@@ -40,14 +40,14 @@ Cargo uses CLI Git for the exact private Kuri revision. BuildKit supplies Git co
 
 ## Credential Boundaries
 
-The deploy process supplies `HOME_ASSISTANT_URL` and `HOME_ASSISTANT_TOKEN` as process environment values. Pulumi validates the HTTPS root origin, wraps the token with `pulumi.secret`, stores it in a `pulumi.Stash`, and consumes the protected stash output when creating the service-local Kubernetes Secret containing the corresponding `SMARTHOME_MCP_` runtime variables. Neither value is stored in stack YAML or plaintext state.
+Bootstrap supplies `HOME_ASSISTANT_URL` and `HOME_ASSISTANT_TOKEN` as process environment values to a targeted Pulumi update of `pulumi:index:Stash::home-assistant-url` and `pulumi:index:Stash::home-assistant-token`. Both inputs are wrapped with `pulumi.secret`. Normal previews and updates use the immutable protected stash outputs to create the service-local Kubernetes Secret containing the corresponding `SMARTHOME_MCP_` runtime variables; they do not need either process environment value. Neither value is stored in stack YAML or plaintext state. An unseeded stack fails closed.
 
-The preview pipeline references the existing Waltr inputs:
+Initial stack bootstrap reads the existing Waltr inputs:
 
 - ConfigMap `homeassistant-component-config`, key `HOME_ASSISTANT_URL`;
 - Secret `homeassistant-component-secret`, key `token`.
 
-Those objects must exist in the PipelineRun namespace. Kubernetes Secrets cannot be mounted across namespaces; Pulumi copies the protected process value into the application Secret in the target service namespace.
+Seed each stack from its matching Waltr namespace before the first full update. This is an operator bootstrap step, not a PipelineRun dependency. The preview pipeline reads only the persisted protected Stash outputs and performs no cross-namespace credential access.
 
 The Home Assistant client sends the token only as a REST bearer credential and as the WebSocket authentication message. Redirects and environment proxies are disabled for REST. Tool input cannot select the origin, path, headers, or credential.
 
@@ -66,9 +66,9 @@ The pipeline:
 3. builds amd64 and arm64 images with BuildKit secret mounts;
 4. creates a multi-architecture manifest;
 5. resolves an immutable digest and verifies runtime UID and OCI revision; and
-6. maps the Home Assistant deploy inputs into process environment, then runs `pulumi preview` and `pulumi up` for `preview`; the Pulumi program protects the token in a Stash.
+6. runs `pulumi preview` and `pulumi up` for `preview` using the previously seeded protected Stash outputs.
 
-The Pulumi step requires its Home Assistant ConfigMap and Secret references, `pulumi-credentials`, `authentik-credentials`, and `tekton-cluster-kubeconfig` in the PipelineRun namespace.
+The Pulumi step requires `pulumi-credentials`, `authentik-credentials`, and `tekton-cluster-kubeconfig` in the PipelineRun namespace. It does not require Home Assistant credentials there.
 
 ## Runtime Contract
 

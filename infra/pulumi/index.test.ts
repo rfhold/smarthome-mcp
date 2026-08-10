@@ -171,11 +171,17 @@ describe("configuration policy", () => {
     const stashes = resources.filter(
       (candidate) => candidate.type === "pulumi:index:Stash",
     );
-    assert.equal(stashes.length, 1);
-    assert.equal(stashes[0].name, "home-assistant-token");
-    const input = stashes[0].inputs.input as Record<string, unknown>;
-    assert.equal(input.value, "test-home-assistant-token");
-    assert.equal(Object.keys(input).length, 2);
+    assert.equal(stashes.length, 2);
+    const url = stashes.find((stash) => stash.name === "home-assistant-url");
+    const token = stashes.find((stash) => stash.name === "home-assistant-token");
+    assert.ok(url);
+    assert.ok(token);
+    const urlInput = url.inputs.input as Record<string, unknown>;
+    const tokenInput = token.inputs.input as Record<string, unknown>;
+    assert.equal(urlInput.value, "https://home-assistant.example.test");
+    assert.equal(tokenInput.value, "test-home-assistant-token");
+    assert.equal(Object.keys(urlInput).length, 2);
+    assert.equal(Object.keys(tokenInput).length, 2);
   });
 });
 

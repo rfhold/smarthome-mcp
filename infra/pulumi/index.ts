@@ -11,12 +11,6 @@ import {
   validateWrappingKeyVersions,
 } from "./policy";
 
-function requireEnv(name: string): string {
-  const value = process.env[name];
-  if (!value) throw new Error(`${name} is required`);
-  return value;
-}
-
 const config = new pulumi.Config();
 const namespaceName = config.require("namespace");
 const hostname = config.require("hostname");
@@ -54,16 +48,33 @@ const activeWrappingKeyVersion = config.require(
 );
 validateWrappingKeyVersions(wrappingKeyVersions, activeWrappingKeyVersion);
 
-const homeAssistantUrl = validateHttpsOrigin(
-  requireEnv("HOME_ASSISTANT_URL"),
-  "HOME_ASSISTANT_URL",
-);
-const homeAssistantTokenStash = new pulumi.Stash("home-assistant-token", {
-  input: pulumi.secret(requireEnv("HOME_ASSISTANT_TOKEN")),
+const unseededStashValue = "__smarthome_mcp_stash_unseeded__";
+const homeAssistantUrlStash = new pulumi.Stash("home-assistant-url", {
+  input: pulumi.secret(process.env.HOME_ASSISTANT_URL ?? unseededStashValue),
 });
-const homeAssistantToken = homeAssistantTokenStash.output.apply((value) =>
-  String(value),
-);
+const homeAssistantTokenStash = new pulumi.Stash("home-assistant-token", {
+  input: pulumi.secret(process.env.HOME_ASSISTANT_TOKEN ?? unseededStashValue),
+});
+const homeAssistantUrl = homeAssistantUrlStash.output.apply((value) => {
+  if (
+    typeof value !== "string" ||
+    !value ||
+    value === unseededStashValue
+  ) {
+    throw new Error("HOME_ASSISTANT_URL stash must be seeded before deployment");
+  }
+  return validateHttpsOrigin(value, "HOME_ASSISTANT_URL stash");
+});
+const homeAssistantToken = homeAssistantTokenStash.output.apply((value) => {
+  if (
+    typeof value !== "string" ||
+    !value ||
+    value === unseededStashValue
+  ) {
+    throw new Error("HOME_ASSISTANT_TOKEN stash must be seeded before deployment");
+  }
+  return value;
+});
 
 const labels = {
   "app.kubernetes.io/name": "smarthome-mcp",
@@ -259,16 +270,17 @@ const wrappingKeys = wrappingKeyVersions.map((version) => ({
 const wrappingKeyring = pulumi.secret(
   pulumi
     .all(wrappingKeys.map(({ key }) => key))
-    .apply((keys) =>
-      JSON.stringify({
+    .apply((keys) => {
+      if (keys.some((key) => typeof key !== "string" || !key)) return "";
+      return JSON.stringify({
         schema_version: 1,
         active: activeWrappingKeyVersion,
         keys: wrappingKeyVersions.map((version, index) => ({
           id: version,
           key: Buffer.from(keys[index], "base64").toString("base64url"),
         })),
-      }),
-    ),
+      });
+    }),
 );
 const wrappingKeyChecksum = wrappingKeyring.apply((keyring) =>
   createHash("sha256").update(keyring).digest("hex"),
