@@ -184,7 +184,7 @@ where
     filter_fn(|metadata| allowed_target(metadata.target())).and(configured_env_filter())
 }
 
-fn trace_filter<S>() -> impl tracing_subscriber::Layer<S>
+pub(crate) fn trace_filter<S>() -> impl tracing_subscriber::Layer<S>
 where
     S: Subscriber,
 {

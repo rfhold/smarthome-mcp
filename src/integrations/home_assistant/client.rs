@@ -2,6 +2,7 @@ use std::{collections::HashSet, sync::Arc, time::Duration};
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use reqwest::{Client, Response, StatusCode, redirect::Policy};
+use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
@@ -12,7 +13,7 @@ use tokio_tungstenite::{
 use tracing::Instrument as _;
 use url::Url;
 
-use crate::config::Secret;
+use crate::{config::Secret, http_client};
 
 use super::{
     Error,
@@ -36,7 +37,7 @@ const MAX_UNIT_BYTES: usize = 64;
 pub struct HomeAssistantClient {
     origin: Url,
     token: Secret,
-    http: Client,
+    http: ClientWithMiddleware,
     concurrency: Arc<Semaphore>,
     timeout: Duration,
 }
@@ -96,7 +97,7 @@ impl HomeAssistantClient {
         Ok(Self {
             origin,
             token,
-            http,
+            http: http_client::with_tracing(http),
             concurrency: Arc::new(Semaphore::new(MAX_CONCURRENT_QUERIES)),
             timeout: REQUEST_TIMEOUT,
         })
@@ -107,11 +108,13 @@ impl HomeAssistantClient {
         Self {
             origin,
             token,
-            http: Client::builder()
-                .redirect(Policy::none())
-                .no_proxy()
-                .build()
-                .unwrap(),
+            http: http_client::with_tracing(
+                Client::builder()
+                    .redirect(Policy::none())
+                    .no_proxy()
+                    .build()
+                    .unwrap(),
+            ),
             concurrency: Arc::new(Semaphore::new(MAX_CONCURRENT_QUERIES)),
             timeout,
         }
@@ -314,15 +317,25 @@ impl HomeAssistantClient {
     }
 
     async fn get_json<T: DeserializeOwned>(&self, url: Url) -> Result<T, Error> {
+        let mut request_span = http_client::RequestSpan::new(&reqwest::Method::GET);
         let response = self
             .http
             .get(url)
             .bearer_auth(self.token.expose())
             .header(reqwest::header::ACCEPT, "application/json")
+            .with_extension(request_span.extension())
             .send()
+            .instrument(request_span.span())
             .await
-            .map_err(|_| Error::UpstreamUnavailable)?;
-        read_json(response).await
+            .map_err(|_| {
+                request_span.transport_error();
+                Error::UpstreamUnavailable
+            })?;
+        let body_span = request_span.span();
+        let body = read_body(response, &mut request_span)
+            .instrument(body_span)
+            .await?;
+        serde_json::from_slice(&body).map_err(|_| Error::InvalidResponse)
     }
 
     async fn exposed_entities(&self) -> Result<HashSet<String>, Error> {
@@ -446,31 +459,57 @@ fn bounded_output(value: Value) -> Result<Value, Error> {
     }
 }
 
-async fn read_json<T: DeserializeOwned>(response: Response) -> Result<T, Error> {
-    match response.status() {
-        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => return Err(Error::Unauthorized),
-        StatusCode::NOT_FOUND => return Err(Error::NotFound),
-        StatusCode::TOO_MANY_REQUESTS => return Err(Error::CapacityExhausted),
-        status if status.is_client_error() => return Err(Error::RequestRejected),
-        status if !status.is_success() => return Err(Error::UpstreamUnavailable),
+async fn read_body(
+    response: Response,
+    request_span: &mut http_client::RequestSpan,
+) -> Result<Vec<u8>, Error> {
+    let status = response.status();
+    match status {
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => {
+            request_span.http_error(status);
+            return Err(Error::Unauthorized);
+        }
+        StatusCode::NOT_FOUND => {
+            request_span.http_error(status);
+            return Err(Error::NotFound);
+        }
+        StatusCode::TOO_MANY_REQUESTS => {
+            request_span.http_error(status);
+            return Err(Error::CapacityExhausted);
+        }
+        status if status.is_client_error() => {
+            request_span.http_error(status);
+            return Err(Error::RequestRejected);
+        }
+        status if !status.is_success() => {
+            request_span.http_error(status);
+            return Err(Error::UpstreamUnavailable);
+        }
         _ => {}
     }
+    request_span.record_status(status);
     if response
         .content_length()
         .is_some_and(|length| length > MAX_RESPONSE_BYTES as u64)
     {
+        request_span.response_error();
         return Err(Error::ResponseTooLarge);
     }
     let mut body = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| Error::UpstreamUnavailable)?;
+        let chunk = chunk.map_err(|_| {
+            request_span.transport_error();
+            Error::UpstreamUnavailable
+        })?;
         if body.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            request_span.response_error();
             return Err(Error::ResponseTooLarge);
         }
         body.extend_from_slice(&chunk);
     }
-    serde_json::from_slice(&body).map_err(|_| Error::InvalidResponse)
+    request_span.success();
+    Ok(body)
 }
 
 async fn websocket_json<S>(socket: &mut WebSocketStream<S>) -> Result<Value, Error>
@@ -492,20 +531,34 @@ where
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{
-        Mutex,
-        atomic::{AtomicUsize, Ordering},
+    use std::{
+        process::Command,
+        sync::{
+            Mutex,
+            atomic::{AtomicUsize, Ordering},
+        },
     };
 
     use axum::{
         Json, Router,
+        body::{Body, Bytes},
         extract::{OriginalUri, Path, State, WebSocketUpgrade, ws},
         http::{HeaderMap, StatusCode},
         response::{IntoResponse, Response},
         routing::get,
     };
     use chrono::{DateTime, Utc};
+    use opentelemetry::{
+        global,
+        trace::{SpanKind, Status, TracerProvider as _},
+    };
+    use opentelemetry_sdk::{
+        propagation::TraceContextPropagator,
+        trace::{Sampler, SdkTracerProvider, SpanData, in_memory_exporter::InMemorySpanExporter},
+    };
     use tokio::{net::TcpListener, task::JoinHandle};
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
 
@@ -515,9 +568,12 @@ mod tests {
         states: Value,
         state_override: Option<Value>,
         history: Value,
+        states_status: StatusCode,
+        states_delay: Option<Duration>,
         websocket_calls: Arc<AtomicUsize>,
         state_calls: Arc<AtomicUsize>,
         requests: Arc<Mutex<Vec<String>>>,
+        traceparents: Arc<Mutex<Vec<String>>>,
     }
 
     impl MockHomeAssistant {
@@ -527,14 +583,27 @@ mod tests {
                 states,
                 state_override: None,
                 history,
+                states_status: StatusCode::OK,
+                states_delay: None,
                 websocket_calls: Arc::new(AtomicUsize::new(0)),
                 state_calls: Arc::new(AtomicUsize::new(0)),
                 requests: Arc::new(Mutex::new(Vec::new())),
+                traceparents: Arc::new(Mutex::new(Vec::new())),
             }
         }
 
         fn with_state_override(mut self, state: Value) -> Self {
             self.state_override = Some(state);
+            self
+        }
+
+        fn with_states_status(mut self, status: StatusCode) -> Self {
+            self.states_status = status;
+            self
+        }
+
+        fn with_states_delay(mut self, delay: Duration) -> Self {
+            self.states_delay = Some(delay);
             self
         }
     }
@@ -645,6 +714,209 @@ mod tests {
             2
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn rest_request_span_is_admitted_propagated_and_privacy_bounded() {
+        const CHILD_ENV: &str = "SMARTHOME_MCP_HTTP_SPAN_TEST_CHILD";
+        const TEST_NAME: &str = "integrations::home_assistant::client::tests::rest_request_span_is_admitted_propagated_and_privacy_bounded";
+        if std::env::var_os(CHILD_ENV).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST_NAME, "--nocapture"])
+                .env(CHILD_ENV, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "child test failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        global::set_text_map_propagator(TraceContextPropagator::new());
+        let exporter = InMemorySpanExporter::default();
+        let provider = SdkTracerProvider::builder()
+            .with_sampler(Sampler::AlwaysOn)
+            .with_simple_exporter(exporter.clone())
+            .build();
+        let tracer = provider.tracer("smarthome-mcp-test");
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(tracer))
+            .with(crate::observability::trace_filter());
+        let dispatch = tracing::Dispatch::new(subscriber);
+
+        let base_mock = || {
+            MockHomeAssistant::new(
+                exposure(&[("sensor.allowed", true)]),
+                json!([raw_state("sensor.allowed", "21", "Kitchen")]),
+                json!([]),
+            )
+        };
+        let (success_result, success_traceparent) =
+            traced_list(base_mock(), Duration::from_secs(2), &dispatch).await;
+        assert!(success_result.is_ok());
+        let (status_error_result, status_error_traceparent) = traced_list(
+            base_mock().with_states_status(StatusCode::NOT_FOUND),
+            Duration::from_secs(2),
+            &dispatch,
+        )
+        .await;
+        assert_eq!(status_error_result, Err(Error::NotFound));
+        let (redirect_result, redirect_traceparent) = traced_list(
+            base_mock().with_states_status(StatusCode::FOUND),
+            Duration::from_secs(2),
+            &dispatch,
+        )
+        .await;
+        assert_eq!(redirect_result, Err(Error::UpstreamUnavailable));
+        let (cancelled_result, cancelled_traceparent) = traced_list(
+            base_mock().with_states_delay(Duration::from_secs(5)),
+            Duration::from_millis(100),
+            &dispatch,
+        )
+        .await;
+        assert_eq!(cancelled_result, Err(Error::Timeout));
+
+        provider.force_flush().unwrap();
+        let spans = exporter.get_finished_spans().unwrap();
+        let query_spans = spans
+            .iter()
+            .filter(|span| span.name == "home_assistant.query")
+            .collect::<Vec<_>>();
+        let client_spans = spans
+            .iter()
+            .filter(|span| span.name == "http.client.request")
+            .collect::<Vec<_>>();
+        assert_eq!(query_spans.len(), 4);
+        assert_eq!(client_spans.len(), 4);
+
+        for traceparent in [
+            success_traceparent,
+            status_error_traceparent,
+            redirect_traceparent,
+            cancelled_traceparent,
+        ] {
+            assert_traceparent_matches_client_span(&traceparent, &client_spans);
+        }
+
+        for client_span in &client_spans {
+            assert_eq!(client_span.span_kind, SpanKind::Client);
+            assert!(query_spans.iter().any(|query_span| {
+                client_span.parent_span_id == query_span.span_context.span_id()
+                    && client_span.span_context.trace_id() == query_span.span_context.trace_id()
+            }));
+            assert_eq!(
+                span_attribute(client_span, "http.request.method").as_deref(),
+                Some("GET")
+            );
+            assert!(span_attribute(client_span, "outcome").is_some_and(|value| !value.is_empty()));
+            assert_span_is_privacy_bounded(client_span);
+        }
+
+        let success_span = client_span(&client_spans, "200", "success");
+        assert_eq!(success_span.status, Status::Unset);
+        let status_error_span = client_span(&client_spans, "404", "http_error");
+        assert!(matches!(status_error_span.status, Status::Error { .. }));
+        let redirect_span = client_span(&client_spans, "302", "http_error");
+        assert_eq!(redirect_span.status, Status::Unset);
+        let cancelled_span = client_span(&client_spans, "200", "cancelled");
+        assert!(matches!(cancelled_span.status, Status::Error { .. }));
+
+        provider.shutdown().unwrap();
+    }
+
+    async fn traced_list(
+        mock: MockHomeAssistant,
+        timeout: Duration,
+        dispatch: &tracing::Dispatch,
+    ) -> (Result<Value, Error>, String) {
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("sensitive-test-token".to_owned()),
+            timeout,
+        );
+        let result = client
+            .list_entities(&EntitiesQuery {
+                query: None,
+                domains: Vec::new(),
+                limit: 50,
+            })
+            .with_subscriber(dispatch.clone())
+            .await;
+        let traceparents = mock.traceparents.lock().unwrap().clone();
+        server.abort();
+        assert_eq!(traceparents.len(), 1);
+        (result, traceparents.into_iter().next().unwrap())
+    }
+
+    fn assert_traceparent_matches_client_span(traceparent: &str, client_spans: &[&SpanData]) {
+        let parts = traceparent.split('-').collect::<Vec<_>>();
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "00");
+        assert_eq!(parts[1].len(), 32);
+        assert_eq!(parts[2].len(), 16);
+        assert_eq!(parts[3].len(), 2);
+        assert!(parts[1].bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert!(parts[2].bytes().all(|byte| byte.is_ascii_hexdigit()));
+        assert_ne!(parts[1], "00000000000000000000000000000000");
+        assert_ne!(parts[2], "0000000000000000");
+        assert!(client_spans.iter().any(|span| {
+            parts[1] == span.span_context.trace_id().to_string()
+                && parts[2] == span.span_context.span_id().to_string()
+        }));
+    }
+
+    fn client_span<'a>(spans: &'a [&SpanData], status: &str, outcome: &str) -> &'a SpanData {
+        spans
+            .iter()
+            .copied()
+            .find(|span| {
+                span_attribute(span, "http.response.status_code").as_deref() == Some(status)
+                    && span_attribute(span, "outcome").as_deref() == Some(outcome)
+            })
+            .unwrap()
+    }
+
+    fn span_attribute(span: &SpanData, key: &str) -> Option<String> {
+        span.attributes
+            .iter()
+            .find(|attribute| attribute.key.as_str() == key)
+            .map(|attribute| attribute.value.to_string())
+    }
+
+    fn assert_span_is_privacy_bounded(span: &SpanData) {
+        for attribute in &span.attributes {
+            assert!(!matches!(
+                attribute.key.as_str(),
+                "server.address"
+                    | "server.port"
+                    | "url.scheme"
+                    | "url.path"
+                    | "url.query"
+                    | "url.full"
+                    | "http.request.header.authorization"
+                    | "http.request.body.size"
+                    | "user_agent.original"
+                    | "error.type"
+                    | "error.message"
+            ));
+        }
+        let exported = format!("{span:?}").to_ascii_lowercase();
+        for sensitive in [
+            "127.0.0.1",
+            "/api/states",
+            "sensor.allowed",
+            "sensitive-test-token",
+            "authorization",
+            "url.",
+            "server.",
+            "error.",
+        ] {
+            assert!(!exported.contains(sensitive));
+        }
     }
 
     #[tokio::test]
@@ -962,7 +1234,18 @@ mod tests {
     async fn all_states(State(mock): State<MockHomeAssistant>, headers: HeaderMap) -> Response {
         record_http_auth(&mock, &headers);
         mock.state_calls.fetch_add(1, Ordering::Relaxed);
-        Json(mock.states).into_response()
+        if let Some(delay) = mock.states_delay {
+            let body = serde_json::to_vec(&mock.states).unwrap();
+            let stream = futures_util::stream::once(async move {
+                tokio::time::sleep(delay).await;
+                Ok::<_, std::io::Error>(Bytes::from(body))
+            });
+            return Response::builder()
+                .status(mock.states_status)
+                .body(Body::from_stream(stream))
+                .unwrap();
+        }
+        (mock.states_status, Json(mock.states)).into_response()
     }
 
     async fn one_state(
@@ -1006,5 +1289,14 @@ mod tests {
             .lock()
             .unwrap()
             .push(format!("http-auth:{authorization}"));
+        if let Some(traceparent) = headers
+            .get("traceparent")
+            .and_then(|value| value.to_str().ok())
+        {
+            mock.traceparents
+                .lock()
+                .unwrap()
+                .push(traceparent.to_owned());
+        }
     }
 }

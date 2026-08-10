@@ -24,6 +24,7 @@ Tests cover:
 - fixed trace admission for the `smarthome_mcp` and `mcp` target trees independent of `RUST_LOG`;
 - bounded Pyroscope tags and cleanup outcomes;
 - exact Home Assistant metric names with allowlisted action and outcome labels;
+- child-process exporter coverage for one-span REST parentage, `traceparent` propagation, success, 4xx, 3xx, cancellation, and sensitive-attribute exclusion;
 - deployment environment and downward API wiring; and
 - declared Alloy and Pyroscope egress ports.
 

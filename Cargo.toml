@@ -10,12 +10,15 @@ base64 = "0.22.1"
 chrono = "0.4.45"
 futures-util = "0.3.31"
 getrandom = "0.4.3"
+http = "1"
 mcp = { git = "https://git.holdenitdown.net/rfhold/kuri.git", rev = "f427d72b2aa7b1bcef1618577da427b9e0ce5c53", default-features = false, features = ["oauth-authorization-server-postgres", "oauth-resource-owner-oidc-postgres", "progressive"] }
 opentelemetry = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["http-proto", "metrics", "reqwest-blocking-client", "trace"] }
 opentelemetry_sdk = { version = "0.32.1", features = ["rt-tokio"] }
 pyroscope = { version = "=2.0.6", features = ["backend-pprof-rs"] }
 reqwest = { version = "0.13.4", default-features = false, features = ["form", "json", "rustls", "stream"] }
+reqwest-middleware = "0.5"
+reqwest-tracing = { version = "0.7.1", features = ["opentelemetry_0_32"] }
 rustls = { version = "0.23.43", default-features = false, features = ["aws_lc_rs"] }
 schemars = "1.2.2"
 serde = { version = "1.0.228", features = ["derive"] }
@@ -30,4 +33,5 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 url = "2.5.7"
 
 [dev-dependencies]
+opentelemetry_sdk = { version = "0.32.1", features = ["testing"] }
 tower = { version = "0.5.2", features = ["util"] }

@@ -31,9 +31,11 @@ SIGTERM or Ctrl-C starts graceful HTTP shutdown. Cleanup stops before bounded Py
 
 ## Data Safety
 
-Home Assistant telemetry uses only fixed action and outcome labels. Spans use target `smarthome_mcp::home_assistant` and name `home_assistant.query`.
+Home Assistant telemetry uses only fixed action and outcome labels. Queries use target `smarthome_mcp::home_assistant` and span name `home_assistant.query`. Each service-owned REST request creates exactly one admitted child span named `http.client.request` under target `smarthome_mcp::http_client`. Standard Reqwest middleware injects that span's W3C `traceparent` and `tracestate`, producing `home_assistant.query` -> `http.client.request` -> Home Assistant REST propagation. For an accepted success status, the span remains open through bounded response-body transfer and ends before JSON or schema validation. Status and declared-size rejections finalize after headers.
 
-Do not record entity IDs, friendly names, domains derived from caller data, states, attributes, search terms, history ranges, Home Assistant URLs, access tokens, authorization headers, WebSocket messages, or upstream bodies. MCP and host metrics likewise use bounded protocol and route dimensions.
+The REST client span records client kind, request method, response status when available, and one bounded outcome. Outcomes are `success`, `http_error`, `transport_error`, `response_error`, and `cancelled`. `response_error` identifies a response-size rejection. A body read failure uses `transport_error`; a dropped future uses `cancelled`. Only 4xx and 5xx HTTP responses set OpenTelemetry error status solely from status. A 1xx or 3xx response can use `http_error` for application handling but retains unset OpenTelemetry status. No outcome contains an error or cause string.
+
+Do not record entity IDs, friendly names, domains derived from caller data, states, attributes, search terms, history ranges, Home Assistant server address or port, URL scheme/path/query/full URL, access tokens, headers, bodies, user agent, or raw error strings. The middleware applies only to service-owned Home Assistant REST requests. It does not instrument the tokio-tungstenite exposure WebSocket or dependency-owned OAuth and CIMD requests. MCP and host metrics likewise use bounded protocol and route dimensions.
 
 ## Validation
 
