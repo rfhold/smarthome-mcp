@@ -16,7 +16,7 @@ use crate::{
     config::OAuthConfig,
     integrations::home_assistant::{
         Error as HomeAssistantError,
-        actions::{GetHistoryInput, GetStatesInput, ListEntitiesInput},
+        actions::{GetHistoryInput, GetStatesInput, ListDevicesInput, ListEntitiesInput},
     },
     services::Services,
 };
@@ -66,11 +66,39 @@ pub fn router(
             "openWorldHint": true
         }),
         namespace(entity, description = "Query Home Assistant entities."),
+        namespace(device, description = "Query Home Assistant devices."),
         namespace(state, description = "Query Home Assistant current states."),
         namespace(history, description = "Query Home Assistant state history.")
     )
 )]
 impl SmarthomeMcp {
+    /// List current normalized states grouped by Home Assistant device and
+    /// effective area. Only entities currently exposed to Assist are included.
+    #[action(tool = "home_assistant_query", name = "device.list")]
+    async fn list_devices(
+        &self,
+        input: ListDevicesInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(_) => {
+                return Ok(tool_error(
+                    "list devices",
+                    HomeAssistantError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.home_assistant.list_devices(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => Ok(query_result("devices", output)),
+            Err(error) => Ok(tool_error("list devices", error)),
+        }
+    }
+
     /// List current states for entities explicitly exposed to Home Assistant's
     /// conversation assistant. Results may be searched, filtered by domain,
     /// and are deterministically limited.
@@ -157,6 +185,7 @@ impl SmarthomeMcp {
 fn query_result(noun: &str, output: serde_json::Value) -> McpToolResult {
     let count = output
         .get("entities")
+        .or_else(|| output.get("devices"))
         .or_else(|| output.get("history"))
         .and_then(serde_json::Value::as_array)
         .map_or(0, Vec::len);
@@ -174,6 +203,7 @@ fn tool_error(action_name: &str, error: HomeAssistantError) -> McpToolResult {
 mod tests {
     use std::time::Duration;
 
+    use axum::{Json, extract::WebSocketUpgrade, response::Response, routing::get};
     use mcp::protocol::MCP_PROTOCOL_VERSION;
     use reqwest::{Client, StatusCode};
     use serde_json::Value;
@@ -193,8 +223,12 @@ mod tests {
     }
 
     async fn endpoint() -> (String, JoinHandle<()>) {
+        endpoint_for(url::Url::parse("http://127.0.0.1:1/").unwrap()).await
+    }
+
+    async fn endpoint_for(home_assistant_origin: url::Url) -> (String, JoinHandle<()>) {
         let client = HomeAssistantClient::for_test(
-            url::Url::parse("http://127.0.0.1:1/").unwrap(),
+            home_assistant_origin,
             Secret("test-token".to_owned()),
             Duration::from_millis(100),
         );
@@ -203,6 +237,64 @@ mod tests {
         });
         let (origin, task) = serve(mcp::server::streamable_http_router(handler)).await;
         (format!("{origin}/mcp"), task)
+    }
+
+    async fn home_assistant() -> (url::Url, JoinHandle<()>) {
+        let router = Router::new()
+            .route("/api/websocket", get(mock_websocket))
+            .route(
+                "/api/states",
+                get(|| async {
+                    Json(json!([{
+                        "entity_id":"sensor.allowed",
+                        "state":"1",
+                        "attributes":{},
+                        "last_changed":"2026-08-10T00:00:00Z",
+                        "last_updated":"2026-08-10T00:00:00Z"
+                    }]))
+                }),
+            );
+        let (origin, task) = serve(router).await;
+        (url::Url::parse(&origin).unwrap(), task)
+    }
+
+    async fn mock_websocket(upgrade: WebSocketUpgrade) -> Response {
+        upgrade.on_upgrade(|mut socket| async move {
+            use axum::extract::ws::Message;
+            use futures_util::StreamExt as _;
+
+            socket
+                .send(Message::Text(
+                    json!({"type":"auth_required"}).to_string().into(),
+                ))
+                .await
+                .unwrap();
+            socket.next().await.unwrap().unwrap();
+            socket
+                .send(Message::Text(json!({"type":"auth_ok"}).to_string().into()))
+                .await
+                .unwrap();
+            while let Some(Ok(Message::Text(text))) = socket.next().await {
+                let command: Value = serde_json::from_str(text.as_ref()).unwrap();
+                let id = command["id"].as_u64().unwrap();
+                let result = match command["type"].as_str().unwrap() {
+                    "homeassistant/expose_entity/list" => json!({
+                        "exposed_entities":{"sensor.allowed":{"conversation":true}}
+                    }),
+                    "config/entity_registry/get_entries" => json!({"sensor.allowed":null}),
+                    "config/device_registry/list" | "config/area_registry/list" => json!([]),
+                    _ => break,
+                };
+                socket
+                    .send(Message::Text(
+                        json!({"id":id,"type":"result","success":true,"result":result})
+                            .to_string()
+                            .into(),
+                    ))
+                    .await
+                    .unwrap();
+            }
+        })
     }
 
     fn request(method: &str, id: &str, params: Value) -> Value {
@@ -286,14 +378,15 @@ mod tests {
         )
         .await;
         let serialized = serde_json::to_string(&response).unwrap();
-        for namespace_help in ["help.entity", "help.state", "help.history"] {
+        for namespace_help in ["help.entity", "help.device", "help.state", "help.history"] {
             assert!(serialized.contains(namespace_help));
         }
-        for legacy in ["list_entities", "get_states", "get_history"] {
+        for legacy in ["list_entities", "list_devices", "get_states", "get_history"] {
             assert!(!serialized.contains(legacy));
         }
         for (namespace_help, action) in [
             ("help.entity", "entity.list"),
+            ("help.device", "device.list"),
             ("help.state", "state.get"),
             ("help.history", "history.get"),
         ] {
@@ -315,10 +408,10 @@ mod tests {
         let (_, discovery) = post(&endpoint, request("tools/list", "list", json!({}))).await;
         let schema =
             serde_json::to_string(&discovery["result"]["tools"][0]["inputSchema"]).unwrap();
-        for action in ["entity.list", "state.get", "history.get"] {
+        for action in ["entity.list", "device.list", "state.get", "history.get"] {
             assert!(schema.contains(action));
         }
-        for legacy in ["list_entities", "get_states", "get_history"] {
+        for legacy in ["list_entities", "list_devices", "get_states", "get_history"] {
             assert!(!schema.contains(legacy));
         }
         task.abort();
@@ -327,7 +420,13 @@ mod tests {
     #[tokio::test]
     async fn legacy_action_names_are_rejected() {
         let (endpoint, task) = endpoint().await;
-        for legacy in ["list_entities", "get_states", "get_history"] {
+        for legacy in [
+            "list_entities",
+            "list_devices",
+            "device_list",
+            "get_states",
+            "get_history",
+        ] {
             let (_, response) = post(
                 &endpoint,
                 request(
@@ -343,5 +442,66 @@ mod tests {
             );
         }
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn device_list_dispatches_and_rejects_unknown_input_fields() {
+        let (home_assistant_origin, home_assistant_task) = home_assistant().await;
+        let (endpoint, task) = endpoint_for(home_assistant_origin).await;
+        let (_, dispatched) = post(
+            &endpoint,
+            request(
+                "tools/call",
+                "device",
+                json!({
+                    "name": TOOL_NAME,
+                    "arguments":{"action":"device.list","input":{"limit":1}}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            dispatched["result"]["structuredContent"]["action"],
+            "device.list"
+        );
+        assert_eq!(
+            dispatched["result"]["structuredContent"]["devices"],
+            json!([{
+                "entities":[{
+                    "entity_id":"sensor.allowed",
+                    "domain":"sensor",
+                    "state":"1",
+                    "last_changed":"2026-08-10T00:00:00Z",
+                    "last_updated":"2026-08-10T00:00:00Z"
+                }]
+            }])
+        );
+        assert_eq!(
+            dispatched["result"]["structuredContent"]["truncated"],
+            false
+        );
+        assert_eq!(
+            dispatched["result"]["content"][0]["text"],
+            "Returned 1 devices item(s)."
+        );
+
+        let (_, rejected) = post(
+            &endpoint,
+            request(
+                "tools/call",
+                "unknown-field",
+                json!({
+                    "name": TOOL_NAME,
+                    "arguments":{
+                        "action":"device.list",
+                        "input":{"limit":1,"unexpected":true}
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert!(rejected.get("error").is_some());
+        task.abort();
+        home_assistant_task.abort();
     }
 }

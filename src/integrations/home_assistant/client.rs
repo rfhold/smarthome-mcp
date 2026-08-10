@@ -1,13 +1,18 @@
-use std::{collections::HashSet, sync::Arc, time::Duration};
+use std::{
+    collections::{BTreeMap, HashMap, HashSet},
+    sync::Arc,
+    time::Duration,
+};
 
 use futures_util::{SinkExt as _, StreamExt as _};
 use reqwest::{Client, Response, StatusCode, redirect::Policy};
 use reqwest_middleware::ClientWithMiddleware;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
+use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_tungstenite::{
-    WebSocketStream, connect_async_with_config,
+    MaybeTlsStream, WebSocketStream, connect_async_with_config,
     tungstenite::{Message, protocol::WebSocketConfig},
 };
 use tracing::Instrument as _;
@@ -17,7 +22,7 @@ use crate::{config::Secret, http_client};
 
 use super::{
     Error,
-    actions::{EntitiesQuery, HistoryQuery, StatesQuery, valid_entity_id},
+    actions::{DevicesQuery, EntitiesQuery, HistoryQuery, StatesQuery, valid_entity_id},
     telemetry::{MetricsGuard, request_outcome},
 };
 
@@ -32,6 +37,10 @@ const MAX_STATE_BYTES: usize = 256;
 const MAX_FRIENDLY_NAME_BYTES: usize = 256;
 const MAX_DEVICE_CLASS_BYTES: usize = 128;
 const MAX_UNIT_BYTES: usize = 64;
+const MAX_REGISTRY_ID_BYTES: usize = 255;
+const MAX_REGISTRY_NAME_BYTES: usize = 256;
+
+type HomeAssistantSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 #[derive(Clone)]
 pub struct HomeAssistantClient {
@@ -65,6 +74,51 @@ struct EntityState {
     unit_of_measurement: Option<String>,
     last_changed: String,
     last_updated: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawEntityRegistryEntry {
+    entity_id: String,
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    area_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawDeviceRegistryEntry {
+    id: String,
+    #[serde(default)]
+    area_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    name_by_user: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawAreaRegistryEntry {
+    area_id: String,
+    name: String,
+}
+
+struct EntityRegistryEntry {
+    device_id: Option<String>,
+    area_id: Option<String>,
+}
+
+struct DeviceRegistryEntry {
+    area_id: Option<String>,
+    name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DeviceGroup {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    area: Option<String>,
+    entities: Vec<EntityState>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -158,6 +212,82 @@ impl HomeAssistantClient {
             bounded_output(json!({
                 "action": "entity.list",
                 "entities": entities,
+                "truncated": truncated,
+            }))
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        let outcome = request_outcome(&result);
+        span.record("outcome", outcome);
+        metrics.finish(outcome);
+        result
+    }
+
+    pub(crate) async fn list_devices(&self, query: &DevicesQuery) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let mut metrics = MetricsGuard::new("device.list");
+        let span = tracing::info_span!(
+            target: "smarthome_mcp::home_assistant",
+            "home_assistant.query",
+            action = "device.list",
+            outcome = tracing::field::Empty,
+        );
+        let result = tokio::time::timeout(self.timeout, async {
+            let mut socket = self.open_websocket().await?;
+            let exposed = self.exposed_entities_on(&mut socket).await?;
+            let url = self.endpoint(&["api", "states"])?;
+            let states: Vec<RawState> = self.get_json(url).await?;
+            let mut entities = states
+                .into_iter()
+                .filter(|state| exposed.contains(&state.entity_id))
+                .map(normalize_state)
+                .collect::<Result<Vec<_>, _>>()?;
+            entities.sort_by(|left, right| left.entity_id.cmp(&right.entity_id));
+            if entities
+                .windows(2)
+                .any(|pair| pair[0].entity_id == pair[1].entity_id)
+            {
+                return Err(Error::InvalidResponse);
+            }
+            let truncated = entities.len() > query.limit;
+            entities.truncate(query.limit);
+
+            if entities.is_empty() {
+                let _ = socket.close(None).await;
+                return bounded_output(json!({
+                    "action": "device.list",
+                    "devices": [],
+                    "truncated": truncated,
+                }));
+            }
+
+            let entity_ids = entities
+                .iter()
+                .map(|state| state.entity_id.clone())
+                .collect::<Vec<_>>();
+            let entity_registry = self.entity_registry(&mut socket, &entity_ids).await?;
+            let referenced_device_ids = entity_registry
+                .values()
+                .filter_map(|entry| entry.as_ref()?.device_id.clone())
+                .collect::<HashSet<_>>();
+            let devices = self
+                .device_registry(&mut socket, &referenced_device_ids)
+                .await?;
+            let referenced_area_ids = entity_registry
+                .values()
+                .filter_map(|entry| entry.as_ref()?.area_id.clone())
+                .chain(devices.values().filter_map(|entry| entry.area_id.clone()))
+                .collect::<HashSet<_>>();
+            let areas = self
+                .area_registry(&mut socket, &referenced_area_ids)
+                .await?;
+            let _ = socket.close(None).await;
+
+            let groups = group_devices(entities, entity_registry, &devices, &areas)?;
+            bounded_output(json!({
+                "action": "device.list",
+                "devices": groups,
                 "truncated": truncated,
             }))
         })
@@ -338,7 +468,7 @@ impl HomeAssistantClient {
         serde_json::from_slice(&body).map_err(|_| Error::InvalidResponse)
     }
 
-    async fn exposed_entities(&self) -> Result<HashSet<String>, Error> {
+    async fn open_websocket(&self) -> Result<HomeAssistantSocket, Error> {
         let mut url = self.origin.clone();
         let scheme = match url.scheme() {
             "https" => "wss",
@@ -374,6 +504,20 @@ impl HomeAssistantClient {
             Some("auth_invalid") => return Err(Error::Unauthorized),
             _ => return Err(Error::InvalidResponse),
         }
+        Ok(socket)
+    }
+
+    async fn exposed_entities(&self) -> Result<HashSet<String>, Error> {
+        let mut socket = self.open_websocket().await?;
+        let exposed = self.exposed_entities_on(&mut socket).await?;
+        let _ = socket.close(None).await;
+        Ok(exposed)
+    }
+
+    async fn exposed_entities_on(
+        &self,
+        socket: &mut HomeAssistantSocket,
+    ) -> Result<HashSet<String>, Error> {
         socket
             .send(Message::Text(
                 json!({"id":1,"type":"homeassistant/expose_entity/list"})
@@ -382,7 +526,7 @@ impl HomeAssistantClient {
             ))
             .await
             .map_err(|_| Error::UpstreamUnavailable)?;
-        let response = websocket_json(&mut socket).await?;
+        let response = websocket_json(socket).await?;
         if response.get("id").and_then(Value::as_u64) != Some(1)
             || response.get("type").and_then(Value::as_str) != Some("result")
             || response.get("success").and_then(Value::as_bool) != Some(true)
@@ -400,8 +544,242 @@ impl HomeAssistantClient {
             })
             .map(|(entity_id, _)| entity_id.clone())
             .collect();
-        let _ = socket.close(None).await;
         Ok(exposed)
+    }
+
+    async fn entity_registry(
+        &self,
+        socket: &mut HomeAssistantSocket,
+        entity_ids: &[String],
+    ) -> Result<HashMap<String, Option<EntityRegistryEntry>>, Error> {
+        let result = self
+            .websocket_command(
+                socket,
+                2,
+                json!({
+                    "id": 2,
+                    "type": "config/entity_registry/get_entries",
+                    "entity_ids": entity_ids,
+                }),
+            )
+            .await?;
+        let object = result.as_object().ok_or(Error::InvalidResponse)?;
+        if object.len() != entity_ids.len()
+            || object
+                .keys()
+                .any(|entity_id| !entity_ids.contains(entity_id))
+        {
+            return Err(Error::InvalidResponse);
+        }
+        let mut entries = HashMap::with_capacity(object.len());
+        for entity_id in entity_ids {
+            let value = object.get(entity_id).ok_or(Error::InvalidResponse)?;
+            if value.is_null() {
+                entries.insert(entity_id.clone(), None);
+                continue;
+            }
+            let raw: RawEntityRegistryEntry =
+                serde_json::from_value(value.clone()).map_err(|_| Error::InvalidResponse)?;
+            if raw.entity_id != *entity_id {
+                return Err(Error::InvalidResponse);
+            }
+            validate_registry_reference(&raw.entity_id)?;
+            validate_optional_registry_reference(&raw.device_id)?;
+            validate_optional_registry_reference(&raw.area_id)?;
+            entries.insert(
+                entity_id.clone(),
+                Some(EntityRegistryEntry {
+                    device_id: raw.device_id,
+                    area_id: raw.area_id,
+                }),
+            );
+        }
+        Ok(entries)
+    }
+
+    async fn device_registry(
+        &self,
+        socket: &mut HomeAssistantSocket,
+        referenced_ids: &HashSet<String>,
+    ) -> Result<HashMap<String, DeviceRegistryEntry>, Error> {
+        let result = self
+            .websocket_command(
+                socket,
+                3,
+                json!({"id":3,"type":"config/device_registry/list"}),
+            )
+            .await?;
+        let raw = result.as_array().ok_or(Error::InvalidResponse)?;
+        let mut entries = HashMap::with_capacity(referenced_ids.len());
+        for value in raw {
+            let Some(id) = value.get("id").and_then(Value::as_str) else {
+                continue;
+            };
+            if !referenced_ids.contains(id) {
+                continue;
+            }
+            let entry: RawDeviceRegistryEntry =
+                serde_json::from_value(value.clone()).map_err(|_| Error::InvalidResponse)?;
+            validate_registry_reference(&entry.id)?;
+            validate_optional_registry_reference(&entry.area_id)?;
+            validate_optional_name(&entry.name)?;
+            validate_optional_name(&entry.name_by_user)?;
+            let name = entry
+                .name_by_user
+                .filter(|value| !value.is_empty())
+                .or_else(|| entry.name.filter(|value| !value.is_empty()));
+            if entries
+                .insert(
+                    entry.id,
+                    DeviceRegistryEntry {
+                        area_id: entry.area_id,
+                        name,
+                    },
+                )
+                .is_some()
+            {
+                return Err(Error::InvalidResponse);
+            }
+        }
+        Ok(entries)
+    }
+
+    async fn area_registry(
+        &self,
+        socket: &mut HomeAssistantSocket,
+        referenced_ids: &HashSet<String>,
+    ) -> Result<HashMap<String, String>, Error> {
+        let result = self
+            .websocket_command(
+                socket,
+                4,
+                json!({"id":4,"type":"config/area_registry/list"}),
+            )
+            .await?;
+        let raw = result.as_array().ok_or(Error::InvalidResponse)?;
+        let mut entries = HashMap::with_capacity(referenced_ids.len());
+        for value in raw {
+            let Some(area_id) = value.get("area_id").and_then(Value::as_str) else {
+                continue;
+            };
+            if !referenced_ids.contains(area_id) {
+                continue;
+            }
+            let entry: RawAreaRegistryEntry =
+                serde_json::from_value(value.clone()).map_err(|_| Error::InvalidResponse)?;
+            validate_registry_reference(&entry.area_id)?;
+            if entry.name.is_empty() || entry.name.len() > MAX_REGISTRY_NAME_BYTES {
+                return Err(Error::InvalidResponse);
+            }
+            if entries.insert(entry.area_id, entry.name).is_some() {
+                return Err(Error::InvalidResponse);
+            }
+        }
+        Ok(entries)
+    }
+
+    async fn websocket_command(
+        &self,
+        socket: &mut HomeAssistantSocket,
+        id: u64,
+        command: Value,
+    ) -> Result<Value, Error> {
+        socket
+            .send(Message::Text(command.to_string().into()))
+            .await
+            .map_err(|_| Error::UpstreamUnavailable)?;
+        let response = websocket_json(socket).await?;
+        if response.get("id").and_then(Value::as_u64) != Some(id)
+            || response.get("type").and_then(Value::as_str) != Some("result")
+            || response.get("success").and_then(Value::as_bool) != Some(true)
+        {
+            return Err(Error::InvalidResponse);
+        }
+        response
+            .get("result")
+            .cloned()
+            .ok_or(Error::InvalidResponse)
+    }
+}
+
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
+enum DeviceGroupKey {
+    Device(String, Option<String>),
+    Standalone(String),
+}
+
+fn group_devices(
+    entities: Vec<EntityState>,
+    mut entity_registry: HashMap<String, Option<EntityRegistryEntry>>,
+    devices: &HashMap<String, DeviceRegistryEntry>,
+    areas: &HashMap<String, String>,
+) -> Result<Vec<DeviceGroup>, Error> {
+    let mut groups = BTreeMap::<DeviceGroupKey, DeviceGroup>::new();
+    for entity in entities {
+        let registry = entity_registry
+            .remove(&entity.entity_id)
+            .ok_or(Error::InvalidResponse)?;
+        let device = registry
+            .as_ref()
+            .and_then(|entry| entry.device_id.as_ref())
+            .and_then(|device_id| devices.get(device_id));
+        let area_id = registry
+            .as_ref()
+            .and_then(|entry| entry.area_id.clone())
+            .or_else(|| device.and_then(|entry| entry.area_id.clone()));
+        let key = registry
+            .as_ref()
+            .and_then(|entry| entry.device_id.clone())
+            .map_or_else(
+                || DeviceGroupKey::Standalone(entity.entity_id.clone()),
+                |device_id| DeviceGroupKey::Device(device_id, area_id.clone()),
+            );
+        let group = groups.entry(key).or_insert_with(|| DeviceGroup {
+            name: device.and_then(|entry| entry.name.clone()),
+            area: area_id
+                .as_ref()
+                .and_then(|area_id| areas.get(area_id).cloned()),
+            entities: Vec::new(),
+        });
+        group.entities.push(entity);
+    }
+    if !entity_registry.is_empty() {
+        return Err(Error::InvalidResponse);
+    }
+    let mut groups = groups.into_values().collect::<Vec<_>>();
+    groups.sort_by(|left, right| {
+        left.area
+            .cmp(&right.area)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.entities[0].entity_id.cmp(&right.entities[0].entity_id))
+    });
+    Ok(groups)
+}
+
+fn validate_registry_reference(value: &str) -> Result<(), Error> {
+    if value.is_empty() || value.len() > MAX_REGISTRY_ID_BYTES {
+        Err(Error::InvalidResponse)
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_optional_registry_reference(value: &Option<String>) -> Result<(), Error> {
+    value
+        .as_deref()
+        .map(validate_registry_reference)
+        .transpose()
+        .map(|_| ())
+}
+
+fn validate_optional_name(value: &Option<String>) -> Result<(), Error> {
+    if value
+        .as_ref()
+        .is_some_and(|value| value.len() > MAX_REGISTRY_NAME_BYTES)
+    {
+        Err(Error::InvalidResponse)
+    } else {
+        Ok(())
     }
 }
 
@@ -565,6 +943,10 @@ mod tests {
     #[derive(Clone)]
     struct MockHomeAssistant {
         exposure: Value,
+        entity_registry: Value,
+        device_registry: Value,
+        area_registry: Value,
+        registry_response_overrides: HashMap<&'static str, Value>,
         states: Value,
         state_override: Option<Value>,
         history: Value,
@@ -573,6 +955,7 @@ mod tests {
         websocket_calls: Arc<AtomicUsize>,
         state_calls: Arc<AtomicUsize>,
         requests: Arc<Mutex<Vec<String>>>,
+        commands: Arc<Mutex<Vec<Value>>>,
         traceparents: Arc<Mutex<Vec<String>>>,
     }
 
@@ -580,6 +963,10 @@ mod tests {
         fn new(exposure: Value, states: Value, history: Value) -> Self {
             Self {
                 exposure,
+                entity_registry: json!({}),
+                device_registry: json!([]),
+                area_registry: json!([]),
+                registry_response_overrides: HashMap::new(),
                 states,
                 state_override: None,
                 history,
@@ -588,6 +975,7 @@ mod tests {
                 websocket_calls: Arc::new(AtomicUsize::new(0)),
                 state_calls: Arc::new(AtomicUsize::new(0)),
                 requests: Arc::new(Mutex::new(Vec::new())),
+                commands: Arc::new(Mutex::new(Vec::new())),
                 traceparents: Arc::new(Mutex::new(Vec::new())),
             }
         }
@@ -604,6 +992,23 @@ mod tests {
 
         fn with_states_delay(mut self, delay: Duration) -> Self {
             self.states_delay = Some(delay);
+            self
+        }
+
+        fn with_registries(
+            mut self,
+            entity_registry: Value,
+            device_registry: Value,
+            area_registry: Value,
+        ) -> Self {
+            self.entity_registry = entity_registry;
+            self.device_registry = device_registry;
+            self.area_registry = area_registry;
+            self
+        }
+
+        fn with_registry_response(mut self, command: &'static str, response: Value) -> Self {
+            self.registry_response_overrides.insert(command, response);
             self
         }
     }
@@ -714,6 +1119,421 @@ mod tests {
             2
         );
         server.abort();
+    }
+
+    #[tokio::test]
+    async fn list_devices_groups_selected_states_and_ignores_invalid_registry_only_data() {
+        let mock = MockHomeAssistant::new(
+            exposure(&[
+                ("sensor.alpha", true),
+                ("sensor.beta", true),
+                ("sensor.standalone", true),
+                ("sensor.unregistered", true),
+                ("sensor.missing_refs", true),
+                ("sensor.hidden", false),
+            ]),
+            json!([
+                raw_state("sensor.hidden", "private", "Hidden State Name"),
+                raw_state("sensor.unregistered", "4", "Unregistered"),
+                raw_state("sensor.beta", "2", "Beta"),
+                raw_state("sensor.alpha", "1", "Alpha"),
+                raw_state("sensor.standalone", "3", "Standalone"),
+                raw_state("sensor.missing_refs", "5", "Missing References")
+            ]),
+            json!([]),
+        )
+        .with_registries(
+            json!({
+                "sensor.alpha": {
+                    "entity_id":"sensor.alpha", "device_id":"device-one", "area_id":"office",
+                    "hidden_by":"must-not-leak", "labels":["must-not-leak"]
+                },
+                "sensor.beta": {
+                    "entity_id":"sensor.beta", "device_id":"device-one", "area_id":null
+                },
+                "sensor.standalone": {
+                    "entity_id":"sensor.standalone", "device_id":null, "area_id":"office"
+                },
+                "sensor.missing_refs": {
+                    "entity_id":"sensor.missing_refs", "device_id":"missing-device",
+                    "area_id":"missing-area"
+                },
+                "sensor.unregistered": null
+            }),
+            json!([
+                {
+                    "id":"device-one", "area_id":"kitchen", "name":"Original Name",
+                    "name_by_user":"Preferred Name", "manufacturer":"must-not-leak",
+                    "model":"must-not-leak", "identifiers":["must-not-leak"]
+                },
+                {
+                    "id":"registry-only-device", "area_id":"private-area",
+                    "name":["malformed", "Registry Only Secret"],
+                    "name_by_user":"x".repeat(257), "manufacturer":"must-not-leak"
+                },
+                {"id":"registry-only-device","area_id":12,"name":false},
+                {"area_id":"private-area","name":"missing unrelated device id"}
+            ]),
+            json!([
+                {"area_id":"kitchen", "name":"Kitchen", "labels":["must-not-leak"]},
+                {"area_id":"office", "name":"Office"},
+                {"area_id":"private-area", "name":["malformed", "Private Registry Area"]},
+                {"area_id":"private-area", "name":"x".repeat(257)},
+                {"name":"missing unrelated area id"}
+            ]),
+        );
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+
+        let result = client
+            .list_devices(&DevicesQuery { limit: 100 })
+            .await
+            .unwrap();
+        assert_eq!(result["action"], "device.list");
+        assert_eq!(result["devices"].as_array().unwrap().len(), 5);
+        assert_eq!(result["truncated"], false);
+
+        let groups = result["devices"].as_array().unwrap();
+        let alpha = group_for(groups, "sensor.alpha");
+        assert_eq!(alpha["name"], "Preferred Name");
+        assert_eq!(alpha["area"], "Office");
+        let beta = group_for(groups, "sensor.beta");
+        assert_eq!(beta["name"], "Preferred Name");
+        assert_eq!(beta["area"], "Kitchen");
+        let standalone = group_for(groups, "sensor.standalone");
+        assert!(standalone.get("name").is_none());
+        assert_eq!(standalone["area"], "Office");
+        let unregistered = group_for(groups, "sensor.unregistered");
+        assert!(unregistered.get("name").is_none());
+        assert!(unregistered.get("area").is_none());
+        let missing = group_for(groups, "sensor.missing_refs");
+        assert!(missing.get("name").is_none());
+        assert!(missing.get("area").is_none());
+
+        let serialized = serde_json::to_string(&result).unwrap();
+        for forbidden in [
+            "sensor.hidden",
+            "private",
+            "Hidden State Name",
+            "registry-only-device",
+            "Registry Only Secret",
+            "Private Registry Area",
+            "device-one",
+            "missing-device",
+            "missing-area",
+            "office\"",
+            "kitchen\"",
+            "manufacturer",
+            "model",
+            "identifiers",
+            "labels",
+            "hidden_by",
+            "latitude",
+            "attributes",
+        ] {
+            assert!(!serialized.contains(forbidden), "leaked {forbidden}");
+        }
+
+        let requests = mock.requests.lock().unwrap();
+        assert_eq!(
+            requests.as_slice(),
+            [
+                "ws-auth:test-token",
+                "ws-command:1:homeassistant/expose_entity/list",
+                "http-auth:Bearer test-token",
+                "ws-command:2:config/entity_registry/get_entries",
+                "ws-command:3:config/device_registry/list",
+                "ws-command:4:config/area_registry/list",
+            ]
+        );
+        let commands = mock.commands.lock().unwrap();
+        assert_eq!(
+            commands[0],
+            json!({"id":1,"type":"homeassistant/expose_entity/list"})
+        );
+        assert_eq!(
+            commands[1],
+            json!({
+                "id":2,
+                "type":"config/entity_registry/get_entries",
+                "entity_ids":[
+                    "sensor.alpha", "sensor.beta", "sensor.missing_refs", "sensor.standalone",
+                    "sensor.unregistered"
+                ]
+            })
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn list_devices_selects_before_grouping_and_refreshes_exposure() {
+        let mock = MockHomeAssistant::new(
+            exposure(&[
+                ("sensor.zulu", true),
+                ("sensor.alpha", true),
+                ("sensor.beta", true),
+            ]),
+            json!([
+                raw_state("sensor.zulu", "3", "Zulu"),
+                raw_state("sensor.beta", "2", "Beta"),
+                raw_state("sensor.alpha", "1", "Alpha")
+            ]),
+            json!([]),
+        )
+        .with_registries(
+            json!({
+                "sensor.alpha":{"entity_id":"sensor.alpha","device_id":"same","area_id":null},
+                "sensor.beta":{"entity_id":"sensor.beta","device_id":"same","area_id":null}
+            }),
+            json!([{"id":"same","area_id":null,"name":"Same","name_by_user":null}]),
+            json!([]),
+        );
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+
+        for _ in 0..2 {
+            let result = client
+                .list_devices(&DevicesQuery { limit: 2 })
+                .await
+                .unwrap();
+            assert_eq!(result["truncated"], true);
+            assert_eq!(result["devices"].as_array().unwrap().len(), 1);
+            assert_eq!(result["devices"][0]["name"], "Same");
+            assert_eq!(
+                result["devices"][0]["entities"][0]["entity_id"],
+                "sensor.alpha"
+            );
+            assert_eq!(
+                result["devices"][0]["entities"][1]["entity_id"],
+                "sensor.beta"
+            );
+        }
+        assert_eq!(mock.websocket_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(mock.state_calls.load(Ordering::Relaxed), 2);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn list_devices_fails_closed_for_malformed_registry_responses() {
+        let base = || {
+            MockHomeAssistant::new(
+                exposure(&[("sensor.allowed", true)]),
+                json!([raw_state("sensor.allowed", "1", "Allowed")]),
+                json!([]),
+            )
+            .with_registries(
+                json!({"sensor.allowed":{"entity_id":"sensor.allowed","device_id":"device","area_id":null}}),
+                json!([{"id":"device","area_id":null,"name":"Device","name_by_user":null}]),
+                json!([]),
+            )
+        };
+        let cases = [
+            base().with_registries(json!({"sensor.allowed":{}}), json!([]), json!([])),
+            base().with_registries(
+                json!({
+                    "sensor.allowed":{"entity_id":"sensor.allowed","device_id":"device","area_id":null},
+                    "sensor.extra":null
+                }),
+                json!([]),
+                json!([]),
+            ),
+            base().with_registries(
+                json!({"sensor.allowed":{"entity_id":"sensor.allowed","device_id":"device","area_id":null}}),
+                json!([
+                    {"id":"device","area_id":null,"name":"One","name_by_user":null},
+                    {"id":"device","area_id":null,"name":"Two","name_by_user":null}
+                ]),
+                json!([]),
+            ),
+            base().with_registries(
+                json!({"sensor.allowed":{"entity_id":"sensor.allowed","device_id":"device","area_id":"area"}}),
+                json!([{"id":"device","area_id":null,"name":"Device","name_by_user":null}]),
+                json!([
+                    {"area_id":"area","name":"One"},
+                    {"area_id":"area","name":"Two"}
+                ]),
+            ),
+            base().with_registries(
+                json!({"sensor.allowed":{"entity_id":"sensor.allowed","device_id":"x".repeat(256),"area_id":null}}),
+                json!([]),
+                json!([]),
+            ),
+            base().with_registries(
+                json!({"sensor.allowed":{"entity_id":"sensor.allowed","device_id":"device","area_id":null}}),
+                json!([{"id":"device","area_id":null,"name":"x".repeat(257),"name_by_user":null}]),
+                json!([]),
+            ),
+            base().with_registries(
+                json!({"sensor.allowed":{"entity_id":"sensor.allowed","device_id":"device","area_id":null}}),
+                json!([{"id":"device","area_id":null,"name":["malformed"],"name_by_user":null}]),
+                json!([]),
+            ),
+            base().with_registries(
+                json!({"sensor.allowed":{"entity_id":"sensor.allowed","device_id":"device","area_id":"area"}}),
+                json!([{"id":"device","area_id":null,"name":"Device","name_by_user":null}]),
+                json!([{"area_id":"area","name":"x".repeat(257)}]),
+            ),
+            base().with_registries(
+                json!({"sensor.allowed":{"entity_id":"sensor.allowed","device_id":"device","area_id":"area"}}),
+                json!([{"id":"device","area_id":null,"name":"Device","name_by_user":null}]),
+                json!([{"area_id":"area","name":["malformed"]}]),
+            ),
+            base().with_registry_response(
+                "config/entity_registry/get_entries",
+                json!({"id":99,"type":"result","success":true,"result":{}}),
+            ),
+            base().with_registry_response(
+                "config/entity_registry/get_entries",
+                json!({"id":2,"type":"event","success":true,"result":{}}),
+            ),
+            base().with_registry_response(
+                "config/entity_registry/get_entries",
+                json!({"id":2,"type":"result","success":false,"result":{}}),
+            ),
+            base().with_registry_response(
+                "config/entity_registry/get_entries",
+                json!({"id":2,"type":"result","success":true}),
+            ),
+            base().with_registry_response(
+                "config/device_registry/list",
+                json!({"id":3,"type":"result","success":false,"result":[]}),
+            ),
+            base().with_registry_response(
+                "config/area_registry/list",
+                json!({"id":4,"type":"result","success":false,"result":[]}),
+            ),
+        ];
+
+        for mock in cases {
+            let (origin, server) = serve(mock).await;
+            let client = HomeAssistantClient::for_test(
+                origin,
+                Secret("test-token".to_owned()),
+                Duration::from_secs(2),
+            );
+            assert_eq!(
+                client.list_devices(&DevicesQuery { limit: 100 }).await,
+                Err(Error::InvalidResponse)
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn list_devices_never_selects_false_or_absent_exposure() {
+        let mock = MockHomeAssistant::new(
+            json!({
+                "id":1,
+                "type":"result",
+                "success":true,
+                "result":{"exposed_entities":{
+                    "sensor.false":{"conversation":false},
+                    "sensor.malformed":{"conversation":"true"}
+                }}
+            }),
+            json!([
+                raw_state("sensor.false", "private", "False"),
+                raw_state("sensor.absent", "private", "Absent"),
+                raw_state("sensor.malformed", "private", "Malformed")
+            ]),
+            json!([]),
+        );
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+
+        let result = client
+            .list_devices(&DevicesQuery { limit: 100 })
+            .await
+            .unwrap();
+        assert!(result["devices"].as_array().unwrap().is_empty());
+        assert!(!serde_json::to_string(&result).unwrap().contains("private"));
+        assert_eq!(mock.commands.lock().unwrap().len(), 1);
+        assert_eq!(mock.state_calls.load(Ordering::Relaxed), 1);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn list_devices_rejects_duplicate_selected_states_and_honors_the_operation_timeout() {
+        let duplicate = MockHomeAssistant::new(
+            exposure(&[("sensor.allowed", true)]),
+            json!([
+                raw_state("sensor.allowed", "1", "Allowed"),
+                raw_state("sensor.allowed", "2", "Allowed Again")
+            ]),
+            json!([]),
+        );
+        let (origin, server) = serve(duplicate).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            client.list_devices(&DevicesQuery { limit: 100 }).await,
+            Err(Error::InvalidResponse)
+        );
+        server.abort();
+
+        let delayed = MockHomeAssistant::new(
+            exposure(&[("sensor.allowed", true)]),
+            json!([raw_state("sensor.allowed", "1", "Allowed")]),
+            json!([]),
+        )
+        .with_states_delay(Duration::from_secs(1));
+        let (origin, server) = serve(delayed).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_millis(50),
+        );
+        assert_eq!(
+            client.list_devices(&DevicesQuery { limit: 100 }).await,
+            Err(Error::Timeout)
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn list_devices_uses_non_waiting_capacity_and_releases_its_permit() {
+        let client = HomeAssistantClient::for_test(
+            Url::parse("http://127.0.0.1:1/").unwrap(),
+            Secret("test-token".to_owned()),
+            Duration::from_millis(50),
+        );
+        let mut permits = (0..MAX_CONCURRENT_QUERIES)
+            .map(|_| client.admit().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            client.list_devices(&DevicesQuery { limit: 100 }).await,
+            Err(Error::CapacityExhausted)
+        );
+
+        permits.pop();
+        assert_eq!(
+            client.list_devices(&DevicesQuery { limit: 100 }).await,
+            Err(Error::UpstreamUnavailable)
+        );
+        assert!(client.admit().is_ok());
+    }
+
+    #[test]
+    fn output_size_is_bounded() {
+        assert_eq!(
+            bounded_output(json!({"value":"x".repeat(MAX_OUTPUT_BYTES)})),
+            Err(Error::ResponseTooLarge)
+        );
     }
 
     #[tokio::test]
@@ -1149,6 +1969,19 @@ mod tests {
         })
     }
 
+    fn group_for<'a>(groups: &'a [Value], entity_id: &str) -> &'a Value {
+        groups
+            .iter()
+            .find(|group| {
+                group["entities"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entity| entity["entity_id"] == entity_id)
+            })
+            .unwrap()
+    }
+
     fn exposure(entries: &[(&str, bool)]) -> Value {
         let entities = entries
             .iter()
@@ -1208,19 +2041,41 @@ mod tests {
             ))
             .await
             .unwrap();
-        let command = receive_json(&mut socket).await;
-        mock.requests.lock().unwrap().push(format!(
-            "ws-command:{}:{}",
-            command
+        while let Some(Ok(message)) = socket.recv().await {
+            let ws::Message::Text(text) = message else {
+                break;
+            };
+            let command: Value = serde_json::from_str(text.as_ref()).unwrap();
+            mock.commands.lock().unwrap().push(command.clone());
+            let id = command
                 .get("id")
                 .and_then(Value::as_u64)
-                .unwrap_or_default(),
-            command.get("type").and_then(Value::as_str).unwrap_or("")
-        ));
-        socket
-            .send(ws::Message::Text(mock.exposure.to_string().into()))
-            .await
-            .unwrap();
+                .unwrap_or_default();
+            let command_type = command.get("type").and_then(Value::as_str).unwrap_or("");
+            mock.requests
+                .lock()
+                .unwrap()
+                .push(format!("ws-command:{id}:{command_type}"));
+            let response = match mock.registry_response_overrides.get(command_type) {
+                Some(response) => response.clone(),
+                None => match command_type {
+                    "homeassistant/expose_entity/list" => mock.exposure.clone(),
+                    "config/entity_registry/get_entries" => {
+                        ws_result(id, mock.entity_registry.clone())
+                    }
+                    "config/device_registry/list" => ws_result(id, mock.device_registry.clone()),
+                    "config/area_registry/list" => ws_result(id, mock.area_registry.clone()),
+                    _ => ws_result(id, Value::Null),
+                },
+            };
+            if socket
+                .send(ws::Message::Text(response.to_string().into()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
     }
 
     async fn receive_json(socket: &mut ws::WebSocket) -> Value {
@@ -1229,6 +2084,10 @@ mod tests {
             ws::Message::Text(text) => serde_json::from_str(text.as_ref()).unwrap(),
             _ => panic!("expected text WebSocket message"),
         }
+    }
+
+    fn ws_result(id: u64, result: Value) -> Value {
+        json!({"id":id,"type":"result","success":true,"result":result})
     }
 
     async fn all_states(State(mock): State<MockHomeAssistant>, headers: HeaderMap) -> Response {

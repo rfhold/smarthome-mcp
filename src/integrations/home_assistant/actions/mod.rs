@@ -1,13 +1,16 @@
 mod get_history;
 mod get_states;
+mod list_devices;
 mod list_entities;
 
 pub use get_history::GetHistoryInput;
 pub use get_states::GetStatesInput;
+pub use list_devices::ListDevicesInput;
 pub use list_entities::ListEntitiesInput;
 
 pub(crate) use get_history::HistoryQuery;
 pub(crate) use get_states::StatesQuery;
+pub(crate) use list_devices::DevicesQuery;
 pub(crate) use list_entities::EntitiesQuery;
 
 pub(crate) fn valid_entity_id(value: &str) -> bool {

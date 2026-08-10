@@ -32,8 +32,8 @@ Run `git diff --check` before finalizing changes.
 | Configuration and host | Strict environment parsing, Home Assistant origin policy, keyring parsing, health, readiness, and cancellation-safe HTTP metrics. |
 | OAuth and OIDC seams | Exact `mcp:use` resource consent, `openid profile email` configuration, and stable issuer-plus-subject principal mapping. |
 | MCP contract | Progressive discovery, dotted actions, legacy-action rejection, one read-only tool, annotations, schema validation, and safe semantic errors. |
-| Home Assistant inputs | Entity IDs, domain/search limits, entity counts, RFC3339 history ranges, defaults, and 24-hour cap. |
-| Home Assistant normalization | Approved state metadata only; arbitrary attributes are omitted. |
+| Home Assistant inputs | Entity IDs, domain/search limits, entity and device-list limits, entity counts, RFC3339 history ranges, defaults, and 24-hour cap. |
+| Home Assistant normalization | Approved state metadata only; device and effective-area enrichment is bounded; arbitrary attributes and raw registry data are omitted. |
 | Home Assistant telemetry | Fixed action/outcome labels and cancellation-safe counters. |
 | Pulumi | Immutable images, HTTPS origins, wrapping-key policy, Home Assistant process-secret propagation, Authentik, CNPG/backups, workload hardening, egress, Service, route, and safe outputs. |
 
@@ -47,6 +47,7 @@ Tests must cover the [Home Assistant specifications](../home-assistant/README.md
 - fail-closed handling for false, absent, malformed, unauthorized, and unavailable exposure results;
 - fixed REST methods and paths with bearer-header-only credentials;
 - deterministic list filtering, sorting, limits, and truncation;
+- selected-entity-only registry enrichment, device-area grouping, area overrides, standalone retention, and registry failure handling;
 - all-or-nothing authorization before per-entity state reads;
 - fixed minimal, no-attributes, significant-only history parameters;
 - approved normalized fields and bounded history points;

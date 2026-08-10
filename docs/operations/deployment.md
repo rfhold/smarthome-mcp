@@ -74,7 +74,7 @@ The Pulumi step requires `pulumi-credentials`, `authentik-credentials`, and `tek
 
 The runtime serves stateless MCP Streamable HTTP revision `2026-07-28` at exact resource `/mcp`. It supports DCR, hardened CIMD, and native loopback clients through PostgreSQL-backed OAuth state.
 
-One progressive read-only tool, `home_assistant_query`, exposes `entity.list`, `state.get`, and `history.get`. Each action performs a fresh Assist exposure lookup over Home Assistant WebSocket and permits only explicit `conversation: true` entries before using fixed REST endpoints. See the [Home Assistant specifications](../home-assistant/README.md).
+One progressive read-only tool, `home_assistant_query`, exposes `entity.list`, `device.list`, `state.get`, and `history.get`. Each action performs a fresh Assist exposure lookup over Home Assistant WebSocket and permits only explicit `conversation: true` entries before using fixed upstream reads. See the [Home Assistant specifications](../home-assistant/README.md).
 
 Controls, service calls, native Home Assistant MCP bridging, and arbitrary HTTP access are not deployed capabilities.
 
