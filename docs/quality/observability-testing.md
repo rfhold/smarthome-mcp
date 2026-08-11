@@ -42,7 +42,7 @@ After an authorized deployment, record timestamps and redacted results for each 
 | MCP metrics | Generic request count, duration, in-flight, and bounded protocol outcomes. |
 | Home Assistant metrics | Request count, duration, in-flight, fixed action labels, and bounded outcomes without entity dimensions. |
 | Profiles | A 100 Hz CPU profile appears with only approved stable tags. |
-| Failure safety | Controlled failures contain no token, URL, entity ID, friendly name, state, attributes, or upstream body. |
+| Failure safety | Controlled failures contain no token, URL, entity ID, friendly name, state, attribute, camera image or Base64, path, MIME value, header, upstream body, or raw error. |
 | Export outage | HTTP remains available while backend freshness and collector health expose delivery failure. |
 | Shutdown | Bounded profile and OpenTelemetry shutdown completes with sanitized status only. |
 

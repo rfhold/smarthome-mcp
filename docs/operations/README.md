@@ -7,3 +7,4 @@ The runtime uses the reviewed immutable Kuri Git revision, and the container and
 | Document | Covers |
 | --- | --- |
 | [Deployment](deployment.md) | Pulumi stacks, Kubernetes resources, credentials, delivery inputs, and operational constraints. |
+| [Observability](observability.md) | Telemetry configuration, data safety, backend validation, and troubleshooting. |

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use axum::Router;
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use mcp::{
     McpProtectedResourceMetadata, McpToolResult, OAuthAuthorizationServer,
     server::{
@@ -16,7 +17,10 @@ use crate::{
     config::OAuthConfig,
     integrations::home_assistant::{
         Error as HomeAssistantError,
-        actions::{GetHistoryInput, GetStatesInput, ListDevicesInput, ListEntitiesInput},
+        actions::{
+            CameraSnapshotInput, GetHistoryInput, GetStatesInput, ListDevicesInput,
+            ListEntitiesInput,
+        },
     },
     services::Services,
 };
@@ -58,7 +62,7 @@ pub fn router(
     description = "Authenticated, policy-bounded smart-home tools.",
     tool(
         name = "home_assistant_query",
-        description = "Read explicitly Assist-exposed Home Assistant entities and bounded history.",
+        description = "Read explicitly Assist-exposed Home Assistant entities, history, and camera frames.",
         annotations = json!({
             "readOnlyHint": true,
             "destructiveHint": false,
@@ -68,7 +72,8 @@ pub fn router(
         namespace(entity, description = "Query Home Assistant entities."),
         namespace(device, description = "Query Home Assistant devices."),
         namespace(state, description = "Query Home Assistant current states."),
-        namespace(history, description = "Query Home Assistant state history.")
+        namespace(history, description = "Query Home Assistant state history."),
+        namespace(camera, description = "Read Home Assistant camera frames.")
     )
 )]
 impl SmarthomeMcp {
@@ -180,6 +185,45 @@ impl SmarthomeMcp {
             Err(error) => Ok(tool_error("get history", error)),
         }
     }
+
+    /// Get the current frame for one camera explicitly exposed to Assist.
+    #[action(tool = "home_assistant_query", name = "camera.snapshot")]
+    async fn camera_snapshot(
+        &self,
+        input: CameraSnapshotInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(_) => {
+                return Ok(tool_error(
+                    "get camera snapshot",
+                    HomeAssistantError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.home_assistant.camera_snapshot_with(&query, |snapshot| async move {
+                let encoded = STANDARD.encode(snapshot.data);
+                Ok(McpToolResult::new(json!({
+                    "content": [
+                        {"type":"text","text":"Returned the current camera frame."},
+                        {"type":"image","data":encoded,"mimeType":snapshot.mime_type}
+                    ],
+                    "structuredContent": {
+                        "action": "camera.snapshot",
+                        "entity_id": snapshot.entity_id,
+                        "mime_type": snapshot.mime_type,
+                    }
+                })))
+            }) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => Ok(output),
+            Err(error) => Ok(tool_error("get camera snapshot", error)),
+        }
+    }
 }
 
 fn query_result(noun: &str, output: serde_json::Value) -> McpToolResult {
@@ -203,7 +247,7 @@ fn tool_error(action_name: &str, error: HomeAssistantError) -> McpToolResult {
 mod tests {
     use std::time::Duration;
 
-    use axum::{Json, extract::WebSocketUpgrade, response::Response, routing::get};
+    use axum::{Json, body::Bytes, extract::WebSocketUpgrade, response::Response, routing::get};
     use mcp::protocol::MCP_PROTOCOL_VERSION;
     use reqwest::{Client, StatusCode};
     use serde_json::Value;
@@ -227,10 +271,17 @@ mod tests {
     }
 
     async fn endpoint_for(home_assistant_origin: url::Url) -> (String, JoinHandle<()>) {
+        endpoint_for_with_timeout(home_assistant_origin, Duration::from_millis(100)).await
+    }
+
+    async fn endpoint_for_with_timeout(
+        home_assistant_origin: url::Url,
+        timeout: Duration,
+    ) -> (String, JoinHandle<()>) {
         let client = HomeAssistantClient::for_test(
             home_assistant_origin,
             Secret("test-token".to_owned()),
-            Duration::from_millis(100),
+            timeout,
         );
         let handler = Arc::new(SmarthomeMcp {
             services: Arc::new(Services::new(client)),
@@ -240,8 +291,20 @@ mod tests {
     }
 
     async fn home_assistant() -> (url::Url, JoinHandle<()>) {
+        home_assistant_with_camera(b"\x89PNG\r\n\x1a\nframe".to_vec()).await
+    }
+
+    async fn home_assistant_with_camera(camera: Vec<u8>) -> (url::Url, JoinHandle<()>) {
+        let camera = Bytes::from(camera);
         let router = Router::new()
             .route("/api/websocket", get(mock_websocket))
+            .route(
+                "/api/camera_proxy/camera.front_door",
+                get(move || {
+                    let camera = camera.clone();
+                    async move { ([(reqwest::header::CONTENT_TYPE, "image/png")], camera) }
+                }),
+            )
             .route(
                 "/api/states",
                 get(|| async {
@@ -279,7 +342,10 @@ mod tests {
                 let id = command["id"].as_u64().unwrap();
                 let result = match command["type"].as_str().unwrap() {
                     "homeassistant/expose_entity/list" => json!({
-                        "exposed_entities":{"sensor.allowed":{"conversation":true}}
+                        "exposed_entities":{
+                            "sensor.allowed":{"conversation":true},
+                            "camera.front_door":{"conversation":true}
+                        }
                     }),
                     "config/entity_registry/get_entries" => json!({"sensor.allowed":null}),
                     "config/device_registry/list" | "config/area_registry/list" => json!([]),
@@ -308,6 +374,11 @@ mod tests {
     }
 
     async fn post(endpoint: &str, body: Value) -> (StatusCode, Value) {
+        let (status, payload, _) = post_with_wire_size(endpoint, body).await;
+        (status, payload)
+    }
+
+    async fn post_with_wire_size(endpoint: &str, body: Value) -> (StatusCode, Value, usize) {
         let method = body["method"].as_str().unwrap();
         let mut request = Client::new()
             .post(endpoint)
@@ -321,12 +392,13 @@ mod tests {
         let response = request.json(&body).send().await.unwrap();
         let status = response.status();
         let text = response.text().await.unwrap();
+        let wire_size = text.len();
         let payload = text
             .lines()
             .rev()
             .find_map(|line| line.strip_prefix("data: "))
             .unwrap_or(&text);
-        (status, serde_json::from_str(payload).unwrap())
+        (status, serde_json::from_str(payload).unwrap(), wire_size)
     }
 
     #[tokio::test]
@@ -378,7 +450,13 @@ mod tests {
         )
         .await;
         let serialized = serde_json::to_string(&response).unwrap();
-        for namespace_help in ["help.entity", "help.device", "help.state", "help.history"] {
+        for namespace_help in [
+            "help.entity",
+            "help.device",
+            "help.state",
+            "help.history",
+            "help.camera",
+        ] {
             assert!(serialized.contains(namespace_help));
         }
         for legacy in ["list_entities", "list_devices", "get_states", "get_history"] {
@@ -389,6 +467,7 @@ mod tests {
             ("help.device", "device.list"),
             ("help.state", "state.get"),
             ("help.history", "history.get"),
+            ("help.camera", "camera.snapshot"),
         ] {
             let (_, help) = post(
                 &endpoint,
@@ -408,7 +487,13 @@ mod tests {
         let (_, discovery) = post(&endpoint, request("tools/list", "list", json!({}))).await;
         let schema =
             serde_json::to_string(&discovery["result"]["tools"][0]["inputSchema"]).unwrap();
-        for action in ["entity.list", "device.list", "state.get", "history.get"] {
+        for action in [
+            "entity.list",
+            "device.list",
+            "state.get",
+            "history.get",
+            "camera.snapshot",
+        ] {
             assert!(schema.contains(action));
         }
         for legacy in ["list_entities", "list_devices", "get_states", "get_history"] {
@@ -523,6 +608,150 @@ mod tests {
         )
         .await;
         assert!(rejected.get("error").is_some());
+        task.abort();
+        home_assistant_task.abort();
+    }
+
+    #[tokio::test]
+    async fn camera_snapshot_dispatches_as_standard_base64_image_and_filters_metadata_only() {
+        let (home_assistant_origin, home_assistant_task) = home_assistant().await;
+        let (endpoint, task) = endpoint_for(home_assistant_origin).await;
+        let (_, dispatched) = post(
+            &endpoint,
+            request(
+                "tools/call",
+                "camera",
+                json!({
+                    "name": TOOL_NAME,
+                    "arguments":{
+                        "action":"camera.snapshot",
+                        "input":{"entity_id":"camera.front_door"}
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(dispatched["result"]["content"][0]["type"], "text");
+        assert_eq!(dispatched["result"]["content"][1]["type"], "image");
+        assert_eq!(dispatched["result"]["content"][1]["mimeType"], "image/png");
+        assert_eq!(
+            STANDARD
+                .decode(dispatched["result"]["content"][1]["data"].as_str().unwrap())
+                .unwrap(),
+            b"\x89PNG\r\n\x1a\nframe"
+        );
+        assert_eq!(
+            dispatched["result"]["structuredContent"],
+            json!({
+                "action":"camera.snapshot",
+                "entity_id":"camera.front_door",
+                "mime_type":"image/png"
+            })
+        );
+        assert!(
+            !serde_json::to_string(&dispatched["result"]["structuredContent"])
+                .unwrap()
+                .contains(dispatched["result"]["content"][1]["data"].as_str().unwrap())
+        );
+
+        let (_, filtered) = post(
+            &endpoint,
+            request(
+                "tools/call",
+                "camera-filter",
+                json!({
+                    "name": TOOL_NAME,
+                    "arguments":{
+                        "action":"camera.snapshot",
+                        "input":{"entity_id":"camera.front_door"},
+                        "filter":".mime_type"
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(filtered["result"]["structuredContent"], "image/png");
+        assert_eq!(filtered["result"]["content"][1]["type"], "image");
+
+        for input in [
+            json!({"entity_id":"sensor.allowed"}),
+            json!({"entity_id":"camera.front_door","unexpected":true}),
+        ] {
+            let (_, rejected) = post(
+                &endpoint,
+                request(
+                    "tools/call",
+                    "camera-rejected",
+                    json!({
+                        "name": TOOL_NAME,
+                        "arguments":{"action":"camera.snapshot","input":input}
+                    }),
+                ),
+            )
+            .await;
+            assert!(
+                rejected.get("error").is_some()
+                    || rejected["result"]["structuredContent"]["error"]["code"]
+                        == "invalid_arguments"
+            );
+        }
+        task.abort();
+        home_assistant_task.abort();
+    }
+
+    #[tokio::test]
+    async fn maximum_camera_snapshot_builds_and_transports_below_the_agent_cap() {
+        const MAX_IMAGE_BYTES: usize = 4 * 1024 * 1024;
+        const AGENT_TRANSPORT_BYTES: usize = 8 * 1024 * 1024;
+
+        let mut image = vec![0; MAX_IMAGE_BYTES];
+        image[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        let (home_assistant_origin, home_assistant_task) =
+            home_assistant_with_camera(image.clone()).await;
+        let (endpoint, task) =
+            endpoint_for_with_timeout(home_assistant_origin, Duration::from_secs(2)).await;
+        let (status, response, wire_size) = post_with_wire_size(
+            &endpoint,
+            request(
+                "tools/call",
+                "maximum-camera",
+                json!({
+                    "name": TOOL_NAME,
+                    "arguments":{
+                        "action":"camera.snapshot",
+                        "input":{"entity_id":"camera.front_door"}
+                    }
+                }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::OK);
+        let data = response["result"]["content"][1]["data"].as_str().unwrap();
+        let decoded = STANDARD.decode(data).unwrap();
+        assert_eq!(decoded.len(), MAX_IMAGE_BYTES);
+        assert_eq!(decoded, image);
+        assert_eq!(STANDARD.encode(&decoded), data);
+        assert_eq!(response["result"]["content"][1]["mimeType"], "image/png");
+        assert_eq!(
+            response["result"]["structuredContent"],
+            json!({
+                "action":"camera.snapshot",
+                "entity_id":"camera.front_door",
+                "mime_type":"image/png"
+            })
+        );
+        assert!(
+            serde_json::to_vec(&response["result"]["structuredContent"])
+                .unwrap()
+                .len()
+                < 256
+        );
+        assert!(
+            wire_size < AGENT_TRANSPORT_BYTES,
+            "wire size was {wire_size}"
+        );
+
         task.abort();
         home_assistant_task.abort();
     }

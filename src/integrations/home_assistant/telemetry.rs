@@ -82,6 +82,7 @@ fn metric_action(value: &'static str) -> &'static str {
         "device.list" => "device.list",
         "state.get" => "state.get",
         "history.get" => "history.get",
+        "camera.snapshot" => "camera.snapshot",
         _ => "unknown",
     }
 }
@@ -125,7 +126,13 @@ mod tests {
 
     #[test]
     fn metric_labels_are_allowlisted() {
-        for action in ["entity.list", "device.list", "state.get", "history.get"] {
+        for action in [
+            "entity.list",
+            "device.list",
+            "state.get",
+            "history.get",
+            "camera.snapshot",
+        ] {
             let mut guard = MetricsGuard::new(action);
             assert_eq!(guard.action, action);
             guard.finish("success");

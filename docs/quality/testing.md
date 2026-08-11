@@ -51,6 +51,14 @@ Tests must cover the [Home Assistant specifications](../home-assistant/README.md
 - all-or-nothing authorization before per-entity state reads;
 - fixed minimal, no-attributes, significant-only history parameters;
 - approved normalized fields and bounded history points;
+- `camera.snapshot` input shape, `camera.*` restriction, and unknown-field rejection;
+- fresh exact exposure authorization before every camera image request;
+- fixed camera proxy GET routing and bearer authentication, with no service call or caller-selected upstream data;
+- exact JPEG, PNG, and WebP MIME values, matching signatures, standard Base64, and decoded and transport bounds;
+- camera success results with short text, one image block, bounded metadata, and no duplicate image bytes;
+- camera error mapping, timeouts, cancellation, capacity exhaustion, and permit release;
+- progressive camera discovery, namespace help, tool annotations, and response filtering;
+- camera privacy across errors, logs, traces, and metrics, including absence of identifiers, image data, paths, MIME, authentication data, headers, bodies, and raw errors;
 - redirect denial, body/frame/URL/time/concurrency bounds, cancellation, and permit release; and
 - stable source-free error codes without URLs, credentials, bodies, entity IDs, or state data.
 
@@ -71,7 +79,7 @@ Before preview acceptance, record separate evidence for:
 | PostgreSQL | Embedded migrations, expiry, one-shot state, replay prevention, refresh rotation, and encrypted signing-key persistence against a disposable database. |
 | Authentik | Discovery, browser login, callback validation, and local token issuance. |
 | Kuri client | DCR, CIMD, loopback authorization, refresh, exact resource binding, and `home_assistant_query`. |
-| Home Assistant | Controlled WebSocket exposure and REST state/history reads for non-sensitive fixtures. |
+| Home Assistant | Controlled WebSocket exposure and REST state, history, and camera proxy reads for non-sensitive fixtures. |
 | Container | Multi-architecture build, UID, revision label, private-material inspection, and startup with controlled dependencies. |
 | Preview | Authorized browser login, authenticated `/mcp`, bounded HA reads, telemetry, probes, and secret non-disclosure. |
 

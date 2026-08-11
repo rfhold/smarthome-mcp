@@ -18,6 +18,8 @@ Each `/mcp` request stands alone after token validation. The service requires no
 
 Every MCP request must use a locally issued ES256 JWT access token. Each token must use JWT type `at+jwt` and contain scope `mcp:use`.
 
+`camera.snapshot` uses this existing tool scope. It requires no new OAuth scope, client grant, or issuer configuration.
+
 Authentik provides browser identity only. Authentik access tokens, ID tokens, and other Authentik credentials never authorize `/mcp`.
 
 ## Roles

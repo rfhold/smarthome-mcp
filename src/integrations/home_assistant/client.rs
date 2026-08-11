@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
+    future::Future,
     sync::Arc,
     time::Duration,
 };
@@ -22,7 +23,10 @@ use crate::{config::Secret, http_client};
 
 use super::{
     Error,
-    actions::{DevicesQuery, EntitiesQuery, HistoryQuery, StatesQuery, valid_entity_id},
+    actions::{
+        CameraSnapshotQuery, DevicesQuery, EntitiesQuery, HistoryQuery, StatesQuery,
+        valid_entity_id,
+    },
     telemetry::{MetricsGuard, request_outcome},
 };
 
@@ -139,6 +143,12 @@ struct HistoryState {
 struct EntityHistory {
     entity_id: String,
     states: Vec<HistoryState>,
+}
+
+pub(crate) struct CameraSnapshot {
+    pub(crate) entity_id: String,
+    pub(crate) mime_type: &'static str,
+    pub(crate) data: Vec<u8>,
 }
 
 impl HomeAssistantClient {
@@ -411,6 +421,61 @@ impl HomeAssistantClient {
         result
     }
 
+    #[cfg(test)]
+    pub(crate) async fn camera_snapshot(
+        &self,
+        query: &CameraSnapshotQuery,
+    ) -> Result<CameraSnapshot, Error> {
+        self.camera_snapshot_with(query, |snapshot| async move { Ok(snapshot) })
+            .await
+    }
+
+    pub(crate) async fn camera_snapshot_with<T, F, Fut>(
+        &self,
+        query: &CameraSnapshotQuery,
+        complete: F,
+    ) -> Result<T, Error>
+    where
+        F: FnOnce(CameraSnapshot) -> Fut,
+        Fut: Future<Output = Result<T, Error>>,
+    {
+        let _permit = self.admit()?;
+        let mut metrics = MetricsGuard::new("camera.snapshot");
+        let span = tracing::info_span!(
+            target: "smarthome_mcp::home_assistant",
+            "home_assistant.query",
+            action = "camera.snapshot",
+            outcome = tracing::field::Empty,
+        );
+        let deadline = tokio::time::Instant::now() + self.timeout;
+        let result = tokio::time::timeout_at(deadline, async {
+            let exposed = self.exposed_entities().await?;
+            self.authorize(std::slice::from_ref(&query.entity_id), &exposed)?;
+            let url = self.endpoint(&["api", "camera_proxy", &query.entity_id])?;
+            let (mime_type, data) = self.get_image(url).await?;
+            let snapshot = CameraSnapshot {
+                entity_id: query.entity_id.clone(),
+                mime_type,
+                data,
+            };
+            let completed = complete(snapshot).await;
+            // Give timeout and cancellation observers a chance to reject synchronous completion.
+            tokio::task::yield_now().await;
+            if tokio::time::Instant::now() >= deadline {
+                Err(Error::Timeout)
+            } else {
+                completed
+            }
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        let outcome = request_outcome(&result);
+        span.record("outcome", outcome);
+        metrics.finish(outcome);
+        result
+    }
+
     fn admit(&self) -> Result<OwnedSemaphorePermit, Error> {
         self.concurrency
             .clone()
@@ -466,6 +531,48 @@ impl HomeAssistantClient {
             .instrument(body_span)
             .await?;
         serde_json::from_slice(&body).map_err(|_| Error::InvalidResponse)
+    }
+
+    async fn get_image(&self, url: Url) -> Result<(&'static str, Vec<u8>), Error> {
+        let mut request_span = http_client::RequestSpan::new(&reqwest::Method::GET);
+        let response = self
+            .http
+            .get(url)
+            .bearer_auth(self.token.expose())
+            .header(reqwest::header::ACCEPT, "image/jpeg, image/png, image/webp")
+            .with_extension(request_span.extension())
+            .send()
+            .instrument(request_span.span())
+            .await
+            .map_err(|_| {
+                request_span.transport_error();
+                Error::UpstreamUnavailable
+            })?;
+        let mime_type = match response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+        {
+            Some("image/jpeg") => Some("image/jpeg"),
+            Some("image/png") => Some("image/png"),
+            Some("image/webp") => Some("image/webp"),
+            _ => None,
+        };
+        let body_span = request_span.span();
+        let body = read_body(response, &mut request_span)
+            .instrument(body_span)
+            .await?;
+        let mime_type = match mime_type {
+            Some("image/jpeg") if body.starts_with(&[0xff, 0xd8, 0xff]) => "image/jpeg",
+            Some("image/png") if body.starts_with(b"\x89PNG\r\n\x1a\n") => "image/png",
+            Some("image/webp")
+                if body.len() >= 12 && &body[..4] == b"RIFF" && &body[8..12] == b"WEBP" =>
+            {
+                "image/webp"
+            }
+            _ => return Err(Error::InvalidResponse),
+        };
+        Ok((mime_type, body))
     }
 
     async fn open_websocket(&self) -> Result<HomeAssistantSocket, Error> {
@@ -913,7 +1020,7 @@ mod tests {
         process::Command,
         sync::{
             Mutex,
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
         },
     };
 
@@ -934,11 +1041,19 @@ mod tests {
         propagation::TraceContextPropagator,
         trace::{Sampler, SdkTracerProvider, SpanData, in_memory_exporter::InMemorySpanExporter},
     };
-    use tokio::{net::TcpListener, task::JoinHandle};
+    use tokio::{net::TcpListener, sync::Notify, task::JoinHandle};
     use tracing::instrument::WithSubscriber as _;
     use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
+
+    struct CompletionGuard(Arc<AtomicBool>);
+
+    impl Drop for CompletionGuard {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+        }
+    }
 
     #[derive(Clone)]
     struct MockHomeAssistant {
@@ -952,8 +1067,15 @@ mod tests {
         history: Value,
         states_status: StatusCode,
         states_delay: Option<Duration>,
+        camera_body: Vec<u8>,
+        camera_content_type: Option<String>,
+        camera_status: StatusCode,
+        camera_delay: Option<Duration>,
+        camera_declared_length: Option<u64>,
+        camera_streamed: bool,
         websocket_calls: Arc<AtomicUsize>,
         state_calls: Arc<AtomicUsize>,
+        camera_calls: Arc<AtomicUsize>,
         requests: Arc<Mutex<Vec<String>>>,
         commands: Arc<Mutex<Vec<Value>>>,
         traceparents: Arc<Mutex<Vec<String>>>,
@@ -972,8 +1094,15 @@ mod tests {
                 history,
                 states_status: StatusCode::OK,
                 states_delay: None,
+                camera_body: vec![0xff, 0xd8, 0xff, 0xd9],
+                camera_content_type: Some("image/jpeg".to_owned()),
+                camera_status: StatusCode::OK,
+                camera_delay: None,
+                camera_declared_length: None,
+                camera_streamed: false,
                 websocket_calls: Arc::new(AtomicUsize::new(0)),
                 state_calls: Arc::new(AtomicUsize::new(0)),
+                camera_calls: Arc::new(AtomicUsize::new(0)),
                 requests: Arc::new(Mutex::new(Vec::new())),
                 commands: Arc::new(Mutex::new(Vec::new())),
                 traceparents: Arc::new(Mutex::new(Vec::new())),
@@ -992,6 +1121,32 @@ mod tests {
 
         fn with_states_delay(mut self, delay: Duration) -> Self {
             self.states_delay = Some(delay);
+            self
+        }
+
+        fn with_camera(mut self, content_type: Option<&str>, body: Vec<u8>) -> Self {
+            self.camera_content_type = content_type.map(str::to_owned);
+            self.camera_body = body;
+            self
+        }
+
+        fn with_camera_status(mut self, status: StatusCode) -> Self {
+            self.camera_status = status;
+            self
+        }
+
+        fn with_camera_delay(mut self, delay: Duration) -> Self {
+            self.camera_delay = Some(delay);
+            self
+        }
+
+        fn with_camera_declared_length(mut self, length: u64) -> Self {
+            self.camera_declared_length = Some(length);
+            self
+        }
+
+        fn with_streamed_camera(mut self) -> Self {
+            self.camera_streamed = true;
             self
         }
 
@@ -1537,6 +1692,457 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn camera_snapshot_refreshes_exposure_then_uses_the_fixed_authenticated_get() {
+        let mock = MockHomeAssistant::new(
+            exposure(&[("camera.front_door", true)]),
+            json!([]),
+            json!([]),
+        );
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+
+        for _ in 0..2 {
+            let snapshot = client.camera_snapshot(&camera_query()).await.unwrap();
+            assert_eq!(snapshot.entity_id, "camera.front_door");
+            assert_eq!(snapshot.mime_type, "image/jpeg");
+            assert_eq!(snapshot.data, [0xff, 0xd8, 0xff, 0xd9]);
+        }
+
+        assert_eq!(mock.websocket_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(mock.camera_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            mock.requests.lock().unwrap().as_slice(),
+            [
+                "ws-auth:test-token",
+                "ws-command:1:homeassistant/expose_entity/list",
+                "http-auth:Bearer test-token",
+                "camera:/api/camera_proxy/camera.front_door",
+                "camera-accept:image/jpeg, image/png, image/webp",
+                "ws-auth:test-token",
+                "ws-command:1:homeassistant/expose_entity/list",
+                "http-auth:Bearer test-token",
+                "camera:/api/camera_proxy/camera.front_door",
+                "camera-accept:image/jpeg, image/png, image/webp",
+            ]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn camera_snapshot_denies_unexposed_entities_before_the_image_get() {
+        let mock = MockHomeAssistant::new(
+            exposure(&[("camera.front_door", false)]),
+            json!([]),
+            json!([]),
+        );
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+
+        assert_eq!(
+            client.camera_snapshot(&camera_query()).await.err(),
+            Some(Error::NotAllowed)
+        );
+        assert_eq!(mock.websocket_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(mock.camera_calls.load(Ordering::Relaxed), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn camera_snapshot_accepts_only_exact_matching_image_types() {
+        let accepted = [
+            ("image/jpeg", vec![0xff, 0xd8, 0xff, 0xd9]),
+            ("image/png", b"\x89PNG\r\n\x1a\nrest".to_vec()),
+            ("image/webp", b"RIFF\x04\0\0\0WEBPdata".to_vec()),
+        ];
+        for (mime_type, body) in accepted {
+            let mock = MockHomeAssistant::new(
+                exposure(&[("camera.front_door", true)]),
+                json!([]),
+                json!([]),
+            )
+            .with_camera(Some(mime_type), body.clone());
+            let (origin, server) = serve(mock).await;
+            let client = HomeAssistantClient::for_test(
+                origin,
+                Secret("test-token".to_owned()),
+                Duration::from_secs(2),
+            );
+            let snapshot = client.camera_snapshot(&camera_query()).await.unwrap();
+            assert_eq!(snapshot.mime_type, mime_type);
+            assert_eq!(snapshot.data, body);
+            server.abort();
+        }
+
+        let rejected = [
+            (None, vec![0xff, 0xd8, 0xff]),
+            (Some("image/jpeg; charset=binary"), vec![0xff, 0xd8, 0xff]),
+            (Some("image/svg+xml"), b"<svg/>".to_vec()),
+            (Some("text/html"), b"<html>no</html>".to_vec()),
+            (Some("application/json"), b"{}".to_vec()),
+            (Some("image/jpeg"), b"not an image".to_vec()),
+            (Some("image/png"), vec![0xff, 0xd8, 0xff]),
+            (Some("image/webp"), b"RIFFbad-data".to_vec()),
+        ];
+        for (content_type, body) in rejected {
+            let mock = MockHomeAssistant::new(
+                exposure(&[("camera.front_door", true)]),
+                json!([]),
+                json!([]),
+            )
+            .with_camera(content_type, body);
+            let (origin, server) = serve(mock).await;
+            let client = HomeAssistantClient::for_test(
+                origin,
+                Secret("test-token".to_owned()),
+                Duration::from_secs(2),
+            );
+            assert_eq!(
+                client.camera_snapshot(&camera_query()).await.err(),
+                Some(Error::InvalidResponse),
+                "accepted {content_type:?}"
+            );
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn camera_snapshot_enforces_declared_and_streamed_image_limits() {
+        let mut exact = vec![0; MAX_RESPONSE_BYTES];
+        exact[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        let exact_mock = MockHomeAssistant::new(
+            exposure(&[("camera.front_door", true)]),
+            json!([]),
+            json!([]),
+        )
+        .with_camera(Some("image/png"), exact)
+        .with_streamed_camera();
+        let (origin, server) = serve(exact_mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            client
+                .camera_snapshot(&camera_query())
+                .await
+                .unwrap()
+                .data
+                .len(),
+            MAX_RESPONSE_BYTES
+        );
+        server.abort();
+
+        let declared_mock = MockHomeAssistant::new(
+            exposure(&[("camera.front_door", true)]),
+            json!([]),
+            json!([]),
+        )
+        .with_camera(Some("image/jpeg"), {
+            let mut body = vec![0; MAX_RESPONSE_BYTES + 1];
+            body[..3].copy_from_slice(&[0xff, 0xd8, 0xff]);
+            body
+        })
+        .with_camera_declared_length(MAX_RESPONSE_BYTES as u64 + 1);
+        let (origin, server) = serve(declared_mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            client.camera_snapshot(&camera_query()).await.err(),
+            Some(Error::ResponseTooLarge)
+        );
+        server.abort();
+
+        let mut overflow = vec![0; MAX_RESPONSE_BYTES + 1];
+        overflow[..3].copy_from_slice(&[0xff, 0xd8, 0xff]);
+        let streamed_mock = MockHomeAssistant::new(
+            exposure(&[("camera.front_door", true)]),
+            json!([]),
+            json!([]),
+        )
+        .with_camera(Some("image/jpeg"), overflow)
+        .with_streamed_camera();
+        let (origin, server) = serve(streamed_mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            client.camera_snapshot(&camera_query()).await.err(),
+            Some(Error::ResponseTooLarge)
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn camera_snapshot_preserves_status_timeout_and_capacity_behavior() {
+        for (status, expected) in [
+            (StatusCode::UNAUTHORIZED, Error::Unauthorized),
+            (StatusCode::FORBIDDEN, Error::Unauthorized),
+            (StatusCode::NOT_FOUND, Error::NotFound),
+            (StatusCode::TOO_MANY_REQUESTS, Error::CapacityExhausted),
+            (StatusCode::BAD_REQUEST, Error::RequestRejected),
+            (StatusCode::FOUND, Error::UpstreamUnavailable),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Error::UpstreamUnavailable,
+            ),
+        ] {
+            let mock = MockHomeAssistant::new(
+                exposure(&[("camera.front_door", true)]),
+                json!([]),
+                json!([]),
+            )
+            .with_camera_status(status);
+            let (origin, server) = serve(mock).await;
+            let client = HomeAssistantClient::for_test(
+                origin,
+                Secret("test-token".to_owned()),
+                Duration::from_secs(2),
+            );
+            assert_eq!(
+                client.camera_snapshot(&camera_query()).await.err(),
+                Some(expected)
+            );
+            server.abort();
+        }
+
+        let delayed = MockHomeAssistant::new(
+            exposure(&[("camera.front_door", true)]),
+            json!([]),
+            json!([]),
+        )
+        .with_camera_delay(Duration::from_secs(1));
+        let (origin, server) = serve(delayed).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_millis(50),
+        );
+        assert_eq!(
+            client.camera_snapshot(&camera_query()).await.err(),
+            Some(Error::Timeout)
+        );
+        assert!(client.admit().is_ok());
+        server.abort();
+
+        let client = HomeAssistantClient::for_test(
+            Url::parse("http://127.0.0.1:1/").unwrap(),
+            Secret("test-token".to_owned()),
+            Duration::from_millis(50),
+        );
+        let mut permits = (0..MAX_CONCURRENT_QUERIES)
+            .map(|_| client.admit().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            client.camera_snapshot(&camera_query()).await.err(),
+            Some(Error::CapacityExhausted)
+        );
+        permits.pop();
+        assert_eq!(
+            client.camera_snapshot(&camera_query()).await.err(),
+            Some(Error::UpstreamUnavailable)
+        );
+        assert!(client.admit().is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancelling_camera_snapshot_releases_its_permit() {
+        let mock = MockHomeAssistant::new(
+            exposure(&[("camera.front_door", true)]),
+            json!([]),
+            json!([]),
+        )
+        .with_camera_delay(Duration::from_secs(5));
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(10),
+        );
+        let running_client = client.clone();
+        let running =
+            tokio::spawn(async move { running_client.camera_snapshot(&camera_query()).await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while mock.camera_calls.load(Ordering::Relaxed) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        running.abort();
+        assert!(matches!(running.await, Err(error) if error.is_cancelled()));
+
+        let permits = (0..MAX_CONCURRENT_QUERIES)
+            .map(|_| client.admit().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(permits.len(), MAX_CONCURRENT_QUERIES);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn camera_snapshot_completion_holds_its_permit_until_success() {
+        let mock = MockHomeAssistant::new(
+            exposure(&[("camera.front_door", true)]),
+            json!([]),
+            json!([]),
+        );
+        let (origin, server) = serve(mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        let started = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let running_client = client.clone();
+        let running_started = Arc::clone(&started);
+        let running_release = Arc::clone(&release);
+        let running = tokio::spawn(async move {
+            running_client
+                .camera_snapshot_with(&camera_query(), |snapshot| async move {
+                    running_started.notify_one();
+                    running_release.notified().await;
+                    Ok(snapshot.data.len())
+                })
+                .await
+        });
+        started.notified().await;
+
+        let permits = (0..MAX_CONCURRENT_QUERIES - 1)
+            .map(|_| client.admit().unwrap())
+            .collect::<Vec<_>>();
+        assert!(matches!(client.admit(), Err(Error::CapacityExhausted)));
+        release.notify_one();
+        assert_eq!(running.await.unwrap(), Ok(4));
+        drop(permits);
+        let permits = (0..MAX_CONCURRENT_QUERIES)
+            .map(|_| client.admit().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(permits.len(), MAX_CONCURRENT_QUERIES);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn camera_snapshot_completion_timeout_drops_work_and_releases_its_permit() {
+        let mock = MockHomeAssistant::new(
+            exposure(&[("camera.front_door", true)]),
+            json!([]),
+            json!([]),
+        );
+        let (origin, server) = serve(mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_millis(200),
+        );
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let completion_started = Arc::clone(&started);
+        let completion_dropped = Arc::clone(&dropped);
+
+        let result = client
+            .camera_snapshot_with(&camera_query(), move |_| async move {
+                let _guard = CompletionGuard(completion_dropped);
+                completion_started.notify_one();
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                Ok(())
+            })
+            .await;
+        assert_eq!(result, Err(Error::Timeout));
+        assert!(dropped.load(Ordering::Relaxed));
+        let permits = (0..MAX_CONCURRENT_QUERIES)
+            .map(|_| client.admit().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(permits.len(), MAX_CONCURRENT_QUERIES);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn camera_snapshot_synchronous_completion_cannot_emit_late_success() {
+        let mock = MockHomeAssistant::new(
+            exposure(&[("camera.front_door", true)]),
+            json!([]),
+            json!([]),
+        );
+        let (origin, server) = serve(mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_millis(50),
+        );
+
+        let result = client
+            .camera_snapshot_with(&camera_query(), |_| async move {
+                std::thread::sleep(Duration::from_millis(100));
+                Ok(())
+            })
+            .await;
+        assert_eq!(result, Err(Error::Timeout));
+        let permits = (0..MAX_CONCURRENT_QUERIES)
+            .map(|_| client.admit().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(permits.len(), MAX_CONCURRENT_QUERIES);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cancelling_camera_snapshot_during_completion_drops_work_and_releases_its_permit() {
+        let mock = MockHomeAssistant::new(
+            exposure(&[("camera.front_door", true)]),
+            json!([]),
+            json!([]),
+        );
+        let (origin, server) = serve(mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(10),
+        );
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let running_client = client.clone();
+        let completion_started = Arc::clone(&started);
+        let completion_dropped = Arc::clone(&dropped);
+        let running = tokio::spawn(async move {
+            running_client
+                .camera_snapshot_with(&camera_query(), move |_| async move {
+                    let _guard = CompletionGuard(completion_dropped);
+                    completion_started.notify_one();
+                    std::future::pending::<Result<(), Error>>().await
+                })
+                .await
+        });
+        started.notified().await;
+
+        let permits = (0..MAX_CONCURRENT_QUERIES - 1)
+            .map(|_| client.admit().unwrap())
+            .collect::<Vec<_>>();
+        assert!(matches!(client.admit(), Err(Error::CapacityExhausted)));
+        running.abort();
+        assert!(matches!(running.await, Err(error) if error.is_cancelled()));
+        assert!(dropped.load(Ordering::Relaxed));
+        drop(permits);
+        let permits = (0..MAX_CONCURRENT_QUERIES)
+            .map(|_| client.admit().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(permits.len(), MAX_CONCURRENT_QUERIES);
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn rest_request_span_is_admitted_propagated_and_privacy_bounded() {
         const CHILD_ENV: &str = "SMARTHOME_MCP_HTTP_SPAN_TEST_CHILD";
         const TEST_NAME: &str = "integrations::home_assistant::client::tests::rest_request_span_is_admitted_propagated_and_privacy_bounded";
@@ -1598,6 +2204,26 @@ mod tests {
         )
         .await;
         assert_eq!(cancelled_result, Err(Error::Timeout));
+        let snapshot_mock = MockHomeAssistant::new(
+            exposure(&[("camera.front_door", true)]),
+            json!([]),
+            json!([]),
+        );
+        let (snapshot_result, snapshot_traceparent) =
+            traced_snapshot(snapshot_mock, Duration::from_secs(2), &dispatch).await;
+        assert!(snapshot_result.is_ok());
+        let invalid_snapshot_mock = MockHomeAssistant::new(
+            exposure(&[("camera.front_door", true)]),
+            json!([]),
+            json!([]),
+        )
+        .with_camera(Some("application/json"), b"sensitive-camera-body".to_vec());
+        let (invalid_snapshot_result, invalid_snapshot_traceparent) =
+            traced_snapshot(invalid_snapshot_mock, Duration::from_secs(2), &dispatch).await;
+        assert!(matches!(
+            invalid_snapshot_result,
+            Err(Error::InvalidResponse)
+        ));
 
         provider.force_flush().unwrap();
         let spans = exporter.get_finished_spans().unwrap();
@@ -1609,14 +2235,16 @@ mod tests {
             .iter()
             .filter(|span| span.name == "http.client.request")
             .collect::<Vec<_>>();
-        assert_eq!(query_spans.len(), 4);
-        assert_eq!(client_spans.len(), 4);
+        assert_eq!(query_spans.len(), 6);
+        assert_eq!(client_spans.len(), 6);
 
         for traceparent in [
             success_traceparent,
             status_error_traceparent,
             redirect_traceparent,
             cancelled_traceparent,
+            snapshot_traceparent,
+            invalid_snapshot_traceparent,
         ] {
             assert_traceparent_matches_client_span(&traceparent, &client_spans);
         }
@@ -1664,6 +2292,27 @@ mod tests {
                 domains: Vec::new(),
                 limit: 50,
             })
+            .with_subscriber(dispatch.clone())
+            .await;
+        let traceparents = mock.traceparents.lock().unwrap().clone();
+        server.abort();
+        assert_eq!(traceparents.len(), 1);
+        (result, traceparents.into_iter().next().unwrap())
+    }
+
+    async fn traced_snapshot(
+        mock: MockHomeAssistant,
+        timeout: Duration,
+        dispatch: &tracing::Dispatch,
+    ) -> (Result<CameraSnapshot, Error>, String) {
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("sensitive-camera-token".to_owned()),
+            timeout,
+        );
+        let result = client
+            .camera_snapshot(&camera_query())
             .with_subscriber(dispatch.clone())
             .await;
         let traceparents = mock.traceparents.lock().unwrap().clone();
@@ -1730,6 +2379,12 @@ mod tests {
             "/api/states",
             "sensor.allowed",
             "sensitive-test-token",
+            "sensitive-camera-token",
+            "/api/camera_proxy",
+            "camera.front_door",
+            "image/jpeg",
+            "application/json",
+            "sensitive-camera-body",
             "authorization",
             "url.",
             "server.",
@@ -2001,11 +2656,18 @@ mod tests {
             .with_timezone(&Utc)
     }
 
+    fn camera_query() -> CameraSnapshotQuery {
+        CameraSnapshotQuery {
+            entity_id: "camera.front_door".to_owned(),
+        }
+    }
+
     async fn serve(mock: MockHomeAssistant) -> (Url, JoinHandle<()>) {
         let app = Router::new()
             .route("/api/websocket", get(websocket))
             .route("/api/states", get(all_states))
             .route("/api/states/{entity_id}", get(one_state))
+            .route("/api/camera_proxy/{entity_id}", get(camera_snapshot))
             .route("/api/history/period/{start}", get(history))
             .with_state(mock);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -2137,6 +2799,48 @@ mod tests {
         mock.state_calls.fetch_add(1, Ordering::Relaxed);
         mock.requests.lock().unwrap().push(format!("history:{uri}"));
         Json(mock.history).into_response()
+    }
+
+    async fn camera_snapshot(
+        State(mock): State<MockHomeAssistant>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+    ) -> Response {
+        record_http_auth(&mock, &headers);
+        mock.camera_calls.fetch_add(1, Ordering::Relaxed);
+        let accept = headers
+            .get(reqwest::header::ACCEPT)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        let mut requests = mock.requests.lock().unwrap();
+        requests.push(format!("camera:{uri}"));
+        requests.push(format!("camera-accept:{accept}"));
+        drop(requests);
+
+        let mut response = Response::builder().status(mock.camera_status);
+        if let Some(content_type) = &mock.camera_content_type {
+            response = response.header(reqwest::header::CONTENT_TYPE, content_type);
+        }
+        if let Some(length) = mock.camera_declared_length {
+            response = response.header(reqwest::header::CONTENT_LENGTH, length);
+        }
+        let body = if let Some(delay) = mock.camera_delay {
+            let body = mock.camera_body.clone();
+            Body::from_stream(futures_util::stream::once(async move {
+                tokio::time::sleep(delay).await;
+                Ok::<_, std::io::Error>(Bytes::from(body))
+            }))
+        } else if mock.camera_streamed {
+            let middle = mock.camera_body.len() / 2;
+            let chunks = vec![
+                Ok::<_, std::io::Error>(Bytes::copy_from_slice(&mock.camera_body[..middle])),
+                Ok(Bytes::copy_from_slice(&mock.camera_body[middle..])),
+            ];
+            Body::from_stream(futures_util::stream::iter(chunks))
+        } else {
+            Body::from(mock.camera_body)
+        };
+        response.body(body).unwrap()
     }
 
     fn record_http_auth(mock: &MockHomeAssistant, headers: &HeaderMap) {

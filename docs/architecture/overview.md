@@ -9,7 +9,7 @@
 | Axum host | Health, readiness, OAuth/OIDC, MCP routing, and graceful shutdown. |
 | Kuri `mcp` | Streamable HTTP, progressive tools, hosted OAuth, OIDC resource-owner flow, and PostgreSQL persistence. |
 | `Services` | Concrete composition root for integration clients. |
-| Home Assistant integration | Input validation, Assist exposure checks, fixed REST and registry reads, normalization, safe errors, and bounded telemetry. |
+| Home Assistant integration | Input validation, Assist exposure checks, fixed REST and registry reads, result validation, safe errors, and bounded telemetry. |
 | PostgreSQL | Durable OAuth, OIDC, and wrapped signing-key state. |
 | Authentik | Browser identity only; its tokens never authorize `/mcp`. |
 
@@ -20,7 +20,7 @@
 3. The integration acquires one of four non-waiting operation permits.
 4. It opens a bounded Home Assistant WebSocket, authenticates, and requests `homeassistant/expose_entity/list`.
 5. It permits only entities explicitly marked `conversation: true`.
-6. It calls fixed upstream reads and returns a bounded normalized result. `device.list` retains its authenticated socket for fixed registry enrichment after selecting exposed current states.
+6. It calls fixed upstream reads and returns bounded normalized data or one validated camera image. `device.list` retains its authenticated socket for fixed registry enrichment after it selects exposed current states.
 
 The caller cannot select an upstream origin, path, credential, header, or Home Assistant service. Control and arbitrary HTTP proxy behavior are outside this architecture.
 

@@ -53,7 +53,7 @@ The Home Assistant client sends the token only as a REST bearer credential and a
 
 The service issues local ES256 access tokens and uses Authentik only for browser identity. The browser requests `openid profile email` through provisioned Authentik mappings. `/mcp` accepts only locally issued tokens bound to the exact resource and `mcp:use` scope. PostgreSQL stores generic OAuth/OIDC state and wrapped signing material; the wrapping-key file uses a separate Secret and read-only mount.
 
-Runtime logs, MCP results, redirects, image layers, Pulumi outputs, and health responses must not expose credentials or Home Assistant household data.
+Runtime surfaces follow the [exposure and data-safety contract](../architecture/exposure-data-safety.md). MCP results expose only the authorized bounded action payload.
 
 ## Preview Pipeline
 
@@ -74,9 +74,11 @@ The Pulumi step requires `pulumi-credentials`, `authentik-credentials`, and `tek
 
 The runtime serves stateless MCP Streamable HTTP revision `2026-07-28` at exact resource `/mcp`. It supports DCR, hardened CIMD, and native loopback clients through PostgreSQL-backed OAuth state.
 
-One progressive read-only tool, `home_assistant_query`, exposes `entity.list`, `device.list`, `state.get`, and `history.get`. Each action performs a fresh Assist exposure lookup over Home Assistant WebSocket and permits only explicit `conversation: true` entries before using fixed upstream reads. See the [Home Assistant specifications](../home-assistant/README.md).
+One progressive read-only tool, `home_assistant_query`, exposes `entity.list`, `device.list`, `state.get`, `history.get`, and `camera.snapshot`. Each action performs a fresh Assist exposure lookup over Home Assistant WebSocket and permits only explicit `conversation: true` entries before using fixed upstream reads. See the [Home Assistant specifications](../home-assistant/README.md).
 
 Controls, service calls, native Home Assistant MCP bridging, and arbitrary HTTP access are not deployed capabilities.
+
+Camera snapshot support requires no infrastructure resource, deployment manifest, runtime configuration, OAuth configuration, or Kuri revision change.
 
 ## Availability and Data
 
