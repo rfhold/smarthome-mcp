@@ -948,11 +948,39 @@ impl HomeAssistantClient {
         duration_seconds: u8,
         id: u64,
     ) -> Result<Vec<ThreadRouter>, Error> {
-        self.websocket_command(socket, id, json!({"id":id,"type":THREAD_DISCOVER_ROUTERS}))
-            .await?;
+        socket
+            .send(Message::Text(
+                json!({"id":id,"type":THREAD_DISCOVER_ROUTERS})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .map_err(|_| Error::UpstreamUnavailable)?;
+        let mut routers = BTreeMap::new();
+        loop {
+            let response = websocket_json(socket).await?;
+            if response.get("id").and_then(Value::as_u64) == Some(id)
+                && response.get("type").and_then(Value::as_str) == Some("event")
+            {
+                apply_router_event(response, id, &mut routers)?;
+                continue;
+            }
+            if response.get("id").and_then(Value::as_u64) != Some(id)
+                || response.get("type").and_then(Value::as_str) != Some("result")
+            {
+                return Err(Error::InvalidResponse);
+            }
+            match response.get("success").and_then(Value::as_bool) {
+                Some(true) => {
+                    response.get("result").ok_or(Error::InvalidResponse)?;
+                    break;
+                }
+                Some(false) => return Err(Error::RequestRejected),
+                None => return Err(Error::InvalidResponse),
+            }
+        }
         let deadline =
             tokio::time::Instant::now() + Duration::from_secs(u64::from(duration_seconds));
-        let mut routers = BTreeMap::new();
         loop {
             let message = match tokio::time::timeout_at(deadline, websocket_json(socket)).await {
                 Ok(result) => result?,
@@ -3969,6 +3997,90 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(output["routers"][0]["key"], "queued");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn router_discovery_retains_a_valid_event_before_subscription_ack() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_registry_response(THREAD_DISCOVER_ROUTERS, ws_result(1, Value::Null))
+            .with_websocket_events_before_response(
+                THREAD_DISCOVER_ROUTERS,
+                vec![json!({"id":1,"type":"event","event":{
+                    "type":"router_discovered","key":"cached","data":{
+                        "instance_name":"cached.local.","addresses":["fe80::1%eth0"],
+                        "border_agent_id":null,"brand":null,"extended_address":"00112233",
+                        "extended_pan_id":"aabbccdd","model_name":null,
+                        "network_name":"Home Thread","server":null,"thread_version":null,
+                        "unconfigured":null,"vendor_name":null
+                    }
+                }})],
+            );
+        let (origin, server) = serve(mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(3),
+        );
+        let output = client
+            .discover_thread_routers(&RouterDiscoveryQuery {
+                duration_seconds: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(output["routers"][0]["key"], "cached");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn router_discovery_rejects_an_unrelated_frame_before_subscription_ack() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_registry_response(THREAD_DISCOVER_ROUTERS, ws_result(1, Value::Null))
+            .with_websocket_events_before_response(
+                THREAD_DISCOVER_ROUTERS,
+                vec![json!({"id":99,"type":"event","event":{
+                    "type":"router_removed","key":"unrelated"
+                }})],
+            );
+        let (origin, server) = serve(mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            client
+                .discover_thread_routers(&RouterDiscoveryQuery {
+                    duration_seconds: 1,
+                })
+                .await,
+            Err(Error::InvalidResponse)
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn router_discovery_maps_subscription_rejection_without_exposing_the_body() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([])).with_registry_response(
+            THREAD_DISCOVER_ROUTERS,
+            json!({"id":1,"type":"result","success":false,"error":{
+                "code":"not_allowed","message":"must-not-leak"
+            }}),
+        );
+        let (origin, server) = serve(mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            client
+                .discover_thread_routers(&RouterDiscoveryQuery {
+                    duration_seconds: 1,
+                })
+                .await,
+            Err(Error::RequestRejected)
+        );
         server.abort();
     }
 
