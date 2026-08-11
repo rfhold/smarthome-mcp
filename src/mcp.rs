@@ -121,7 +121,7 @@ impl SmarthomeMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         match result {
-            Ok(output) => Ok(query_result("devices", output)),
+            Ok(output) => query_result(output),
             Err(error) => Ok(tool_error("list devices", error)),
         }
     }
@@ -149,7 +149,7 @@ impl SmarthomeMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         match result {
-            Ok(output) => Ok(query_result("entities", output)),
+            Ok(output) => query_result(output),
             Err(error) => Ok(tool_error("list entities", error)),
         }
     }
@@ -176,7 +176,7 @@ impl SmarthomeMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         match result {
-            Ok(output) => Ok(query_result("states", output)),
+            Ok(output) => query_result(output),
             Err(error) => Ok(tool_error("get states", error)),
         }
     }
@@ -203,7 +203,7 @@ impl SmarthomeMcp {
             () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
         };
         match result {
-            Ok(output) => Ok(query_result("history", output)),
+            Ok(output) => query_result(output),
             Err(error) => Ok(tool_error("get history", error)),
         }
     }
@@ -619,17 +619,8 @@ fn control_result(output: serde_json::Value) -> McpToolResult {
     }))
 }
 
-fn query_result(noun: &str, output: serde_json::Value) -> McpToolResult {
-    let count = output
-        .get("entities")
-        .or_else(|| output.get("devices"))
-        .or_else(|| output.get("history"))
-        .and_then(serde_json::Value::as_array)
-        .map_or(0, Vec::len);
-    McpToolResult::new(json!({
-        "content": [{"type":"text","text":format!("Returned {count} {noun} item(s).")}],
-        "structuredContent": output
-    }))
+fn query_result(output: serde_json::Value) -> ServerResult<McpToolResult> {
+    mcp::progressive::tool_result(output, None)
 }
 
 fn tool_error(action_name: &str, error: HomeAssistantError) -> McpToolResult {
@@ -1064,6 +1055,21 @@ mod tests {
         task.abort();
     }
 
+    #[test]
+    fn unfiltered_query_results_put_complete_json_in_text_and_structured_content() {
+        for output in [
+            json!({"action":"device.list","devices":[],"truncated":false}),
+            json!({"action":"entity.list","entities":[],"truncated":false}),
+            json!({"action":"state.get","entities":[]}),
+            json!({"action":"history.get","history":[]}),
+        ] {
+            let result = query_result(output.clone()).unwrap();
+            let text = result.raw["content"][0]["text"].as_str().unwrap();
+            assert_eq!(serde_json::from_str::<Value>(text).unwrap(), output);
+            assert_eq!(result.raw["structuredContent"], output);
+        }
+    }
+
     #[tokio::test]
     async fn device_list_dispatches_filters_and_rejects_unknown_input_fields() {
         let (home_assistant_origin, home_assistant_task) = home_assistant().await;
@@ -1100,9 +1106,10 @@ mod tests {
             dispatched["result"]["structuredContent"]["truncated"],
             false
         );
+        let text = dispatched["result"]["content"][0]["text"].as_str().unwrap();
         assert_eq!(
-            dispatched["result"]["content"][0]["text"],
-            "Returned 1 devices item(s)."
+            serde_json::from_str::<Value>(text).unwrap(),
+            dispatched["result"]["structuredContent"]
         );
 
         let (_, filtered) = post(

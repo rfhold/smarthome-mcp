@@ -6,4 +6,6 @@ One invocation acquires one of four non-waiting permits and has a 20-second end-
 
 The server uses a fixed origin and credential. It disables REST redirects and environment proxies and never returns upstream wrappers or error bodies. Execution actions read and discard bounded upstream results and return only a minimal result.
 
+Successful unfiltered `device.list`, `entity.list`, `state.get`, and `history.get` results return the complete normalized object as serialized JSON text and as the same object in `structuredContent`. Progressive filters keep text and structured content synchronized. Camera results retain their specialized image response, and execution actions retain their minimal acknowledgment response.
+
 Semantic failures use `structuredContent.error` with stable `code`, `message`, and `retryable` fields. Codes are `invalid_arguments`, `capacity_exhausted`, `timeout`, `home_assistant_unauthorized`, `not_allowed`, `entity_not_found`, `request_rejected`, `upstream_unavailable`, `response_too_large`, and `invalid_response`. All errors follow the [exposure and data-safety privacy contract](../../architecture/exposure-data-safety.md).

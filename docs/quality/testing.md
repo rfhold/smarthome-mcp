@@ -31,7 +31,7 @@ Run `git diff --check` before finalizing changes.
 | --- | --- |
 | Configuration and host | Strict environment parsing, Home Assistant origin policy, keyring parsing, health, readiness, and cancellation-safe HTTP metrics. |
 | OAuth and OIDC seams | Exact `mcp:use` resource consent, `openid profile email` configuration, and stable issuer-plus-subject principal mapping. |
-| MCP contract | Progressive discovery, dotted actions, legacy-action rejection, separate query and execution tools, annotations, schema validation, and safe semantic errors. |
+| MCP contract | Progressive discovery, dotted actions, legacy-action rejection, separate query and execution tools, annotations, schema validation, synchronized JSON text and structured query results, specialized camera and execution results, and safe semantic errors. |
 | Home Assistant inputs | Entity IDs, domain/search limits, entity and device-list limits, entity counts, RFC3339 history ranges, defaults, read limits, and bounded common-control values. |
 | Home Assistant normalization | Approved state metadata only; device and effective-area enrichment is bounded; arbitrary attributes and raw registry data are omitted. |
 | Home Assistant telemetry | Fixed action/outcome labels and cancellation-safe counters. |
