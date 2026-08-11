@@ -17,16 +17,16 @@ fn metrics() -> &'static HomeAssistantMetrics {
         HomeAssistantMetrics {
             requests: meter
                 .u64_counter("smarthome_mcp.home_assistant.requests")
-                .with_description("Completed bounded Home Assistant queries")
+                .with_description("Completed bounded Home Assistant operations")
                 .build(),
             duration: meter
                 .f64_histogram("smarthome_mcp.home_assistant.duration")
                 .with_unit("s")
-                .with_description("Home Assistant query duration")
+                .with_description("Home Assistant operation duration")
                 .build(),
             in_flight: meter
                 .i64_up_down_counter("smarthome_mcp.home_assistant.in_flight")
-                .with_description("Active Home Assistant queries")
+                .with_description("Active Home Assistant operations")
                 .build(),
         }
     })
@@ -83,6 +83,29 @@ fn metric_action(value: &'static str) -> &'static str {
         "state.get" => "state.get",
         "history.get" => "history.get",
         "camera.snapshot" => "camera.snapshot",
+        "scene.activate" => "scene.activate",
+        "light.turn_on" => "light.turn_on",
+        "light.turn_off" => "light.turn_off",
+        "switch.turn_on" => "switch.turn_on",
+        "switch.turn_off" => "switch.turn_off",
+        "fan.turn_on" => "fan.turn_on",
+        "fan.turn_off" => "fan.turn_off",
+        "fan.set_percentage" => "fan.set_percentage",
+        "cover.open" => "cover.open",
+        "cover.close" => "cover.close",
+        "cover.stop" => "cover.stop",
+        "cover.set_position" => "cover.set_position",
+        "climate.turn_on" => "climate.turn_on",
+        "climate.turn_off" => "climate.turn_off",
+        "climate.set_temperature" => "climate.set_temperature",
+        "media_player.turn_on" => "media_player.turn_on",
+        "media_player.turn_off" => "media_player.turn_off",
+        "media_player.play" => "media_player.play",
+        "media_player.pause" => "media_player.pause",
+        "media_player.stop" => "media_player.stop",
+        "media_player.volume_set" => "media_player.volume_set",
+        "lock.lock" => "lock.lock",
+        "lock.unlock" => "lock.unlock",
         _ => "unknown",
     }
 }
@@ -132,6 +155,29 @@ mod tests {
             "state.get",
             "history.get",
             "camera.snapshot",
+            "scene.activate",
+            "light.turn_on",
+            "light.turn_off",
+            "switch.turn_on",
+            "switch.turn_off",
+            "fan.turn_on",
+            "fan.turn_off",
+            "fan.set_percentage",
+            "cover.open",
+            "cover.close",
+            "cover.stop",
+            "cover.set_position",
+            "climate.turn_on",
+            "climate.turn_off",
+            "climate.set_temperature",
+            "media_player.turn_on",
+            "media_player.turn_off",
+            "media_player.play",
+            "media_player.pause",
+            "media_player.stop",
+            "media_player.volume_set",
+            "lock.lock",
+            "lock.unlock",
         ] {
             let mut guard = MetricsGuard::new(action);
             assert_eq!(guard.action, action);

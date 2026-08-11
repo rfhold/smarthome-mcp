@@ -18,8 +18,10 @@ use crate::{
     integrations::home_assistant::{
         Error as HomeAssistantError,
         actions::{
-            CameraSnapshotInput, GetHistoryInput, GetStatesInput, ListDevicesInput,
-            ListEntitiesInput,
+            CameraSnapshotInput, ClimateTemperatureInput, Control, ControlAction,
+            CoverPositionInput, EntityControlInput, FanPercentageInput, GetHistoryInput,
+            GetStatesInput, LightTurnOnInput, ListDevicesInput, ListEntitiesInput,
+            MediaPlayerVolumeInput,
         },
     },
     services::Services,
@@ -27,6 +29,8 @@ use crate::{
 
 #[cfg(test)]
 const TOOL_NAME: &str = "home_assistant_query";
+#[cfg(test)]
+const EXEC_TOOL_NAME: &str = "home_assistant_exec";
 
 #[derive(Clone)]
 pub struct SmarthomeMcp {
@@ -74,6 +78,24 @@ pub fn router(
         namespace(state, description = "Query Home Assistant current states."),
         namespace(history, description = "Query Home Assistant state history."),
         namespace(camera, description = "Read Home Assistant camera frames.")
+    ),
+    tool(
+        name = "home_assistant_exec",
+        description = "Operate explicitly Assist-exposed Home Assistant entities with fixed common controls.",
+        annotations = json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true
+        }),
+        namespace(scene, description = "Activate Home Assistant scenes."),
+        namespace(light, description = "Control Home Assistant lights."),
+        namespace(switch, description = "Control Home Assistant switches."),
+        namespace(fan, description = "Control Home Assistant fans."),
+        namespace(cover, description = "Control Home Assistant covers."),
+        namespace(climate, description = "Control Home Assistant climate entities."),
+        namespace(media_player, description = "Control Home Assistant media players."),
+        namespace(lock, description = "Control Home Assistant locks.")
     )
 )]
 impl SmarthomeMcp {
@@ -224,6 +246,377 @@ impl SmarthomeMcp {
             Err(error) => Ok(tool_error("get camera snapshot", error)),
         }
     }
+
+    /// Activate one scene explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "scene.activate")]
+    async fn activate_scene(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "activate scene",
+            input.validate(ControlAction::SceneActivate),
+            context,
+        )
+        .await
+    }
+
+    /// Turn on one light, optionally with a brightness percentage.
+    #[action(tool = "home_assistant_exec", name = "light.turn_on")]
+    async fn turn_on_light(
+        &self,
+        input: LightTurnOnInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(self, "turn on light", input.validate(), context).await
+    }
+
+    /// Turn off one light explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "light.turn_off")]
+    async fn turn_off_light(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "turn off light",
+            input.validate(ControlAction::LightTurnOff),
+            context,
+        )
+        .await
+    }
+
+    /// Turn on one switch explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "switch.turn_on")]
+    async fn turn_on_switch(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "turn on switch",
+            input.validate(ControlAction::SwitchTurnOn),
+            context,
+        )
+        .await
+    }
+
+    /// Turn off one switch explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "switch.turn_off")]
+    async fn turn_off_switch(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "turn off switch",
+            input.validate(ControlAction::SwitchTurnOff),
+            context,
+        )
+        .await
+    }
+
+    /// Turn on one fan explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "fan.turn_on")]
+    async fn turn_on_fan(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "turn on fan",
+            input.validate(ControlAction::FanTurnOn),
+            context,
+        )
+        .await
+    }
+
+    /// Turn off one fan explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "fan.turn_off")]
+    async fn turn_off_fan(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "turn off fan",
+            input.validate(ControlAction::FanTurnOff),
+            context,
+        )
+        .await
+    }
+
+    /// Set one fan's percentage from 0 through 100.
+    #[action(tool = "home_assistant_exec", name = "fan.set_percentage")]
+    async fn set_fan_percentage(
+        &self,
+        input: FanPercentageInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(self, "set fan percentage", input.validate(), context).await
+    }
+
+    /// Open one cover explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "cover.open")]
+    async fn open_cover(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "open cover",
+            input.validate(ControlAction::CoverOpen),
+            context,
+        )
+        .await
+    }
+
+    /// Close one cover explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "cover.close")]
+    async fn close_cover(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "close cover",
+            input.validate(ControlAction::CoverClose),
+            context,
+        )
+        .await
+    }
+
+    /// Stop one cover explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "cover.stop")]
+    async fn stop_cover(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "stop cover",
+            input.validate(ControlAction::CoverStop),
+            context,
+        )
+        .await
+    }
+
+    /// Set one cover's position from 0 through 100.
+    #[action(tool = "home_assistant_exec", name = "cover.set_position")]
+    async fn set_cover_position(
+        &self,
+        input: CoverPositionInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(self, "set cover position", input.validate(), context).await
+    }
+
+    /// Turn on one climate entity explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "climate.turn_on")]
+    async fn turn_on_climate(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "turn on climate entity",
+            input.validate(ControlAction::ClimateTurnOn),
+            context,
+        )
+        .await
+    }
+
+    /// Turn off one climate entity explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "climate.turn_off")]
+    async fn turn_off_climate(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "turn off climate entity",
+            input.validate(ControlAction::ClimateTurnOff),
+            context,
+        )
+        .await
+    }
+
+    /// Set one climate entity's finite temperature from -273.15 through 1000.
+    #[action(tool = "home_assistant_exec", name = "climate.set_temperature")]
+    async fn set_climate_temperature(
+        &self,
+        input: ClimateTemperatureInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(self, "set climate temperature", input.validate(), context).await
+    }
+
+    /// Turn on one media player explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "media_player.turn_on")]
+    async fn turn_on_media_player(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "turn on media player",
+            input.validate(ControlAction::MediaPlayerTurnOn),
+            context,
+        )
+        .await
+    }
+
+    /// Turn off one media player explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "media_player.turn_off")]
+    async fn turn_off_media_player(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "turn off media player",
+            input.validate(ControlAction::MediaPlayerTurnOff),
+            context,
+        )
+        .await
+    }
+
+    /// Start playback on one media player explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "media_player.play")]
+    async fn play_media_player(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "play media player",
+            input.validate(ControlAction::MediaPlayerPlay),
+            context,
+        )
+        .await
+    }
+
+    /// Pause playback on one media player explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "media_player.pause")]
+    async fn pause_media_player(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "pause media player",
+            input.validate(ControlAction::MediaPlayerPause),
+            context,
+        )
+        .await
+    }
+
+    /// Stop playback on one media player explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "media_player.stop")]
+    async fn stop_media_player(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "stop media player",
+            input.validate(ControlAction::MediaPlayerStop),
+            context,
+        )
+        .await
+    }
+
+    /// Set one media player's volume from 0.0 through 1.0.
+    #[action(tool = "home_assistant_exec", name = "media_player.volume_set")]
+    async fn set_media_player_volume(
+        &self,
+        input: MediaPlayerVolumeInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(self, "set media player volume", input.validate(), context).await
+    }
+
+    /// Lock one lock explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "lock.lock")]
+    async fn lock_lock(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "lock entity",
+            input.validate(ControlAction::LockLock),
+            context,
+        )
+        .await
+    }
+
+    /// Unlock one lock explicitly exposed to Assist.
+    #[action(tool = "home_assistant_exec", name = "lock.unlock")]
+    async fn unlock_lock(
+        &self,
+        input: EntityControlInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_control(
+            self,
+            "unlock entity",
+            input.validate(ControlAction::LockUnlock),
+            context,
+        )
+        .await
+    }
+}
+
+async fn execute_control(
+    server: &SmarthomeMcp,
+    description: &'static str,
+    control: Result<Control, ()>,
+    context: ServerContext,
+) -> ServerResult<McpToolResult> {
+    let control = match control {
+        Ok(control) => control,
+        Err(()) => {
+            return Ok(tool_error(
+                description,
+                HomeAssistantError::InvalidArguments,
+            ));
+        }
+    };
+    let result = tokio::select! {
+        result = server.services.home_assistant.execute_control(&control) => result,
+        () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+    };
+    match result {
+        Ok(output) => Ok(control_result(output)),
+        Err(error) => Ok(tool_error(description, error)),
+    }
+}
+
+fn control_result(output: serde_json::Value) -> McpToolResult {
+    let action = output["action"].as_str().unwrap_or("control");
+    McpToolResult::new(json!({
+        "content": [{"type":"text","text":format!("Completed {action}.")}],
+        "structuredContent": output
+    }))
 }
 
 fn query_result(noun: &str, output: serde_json::Value) -> McpToolResult {
@@ -247,7 +640,13 @@ fn tool_error(action_name: &str, error: HomeAssistantError) -> McpToolResult {
 mod tests {
     use std::time::Duration;
 
-    use axum::{Json, body::Bytes, extract::WebSocketUpgrade, response::Response, routing::get};
+    use axum::{
+        Json,
+        body::Bytes,
+        extract::WebSocketUpgrade,
+        response::Response,
+        routing::{get, post as route_post},
+    };
     use mcp::protocol::MCP_PROTOCOL_VERSION;
     use reqwest::{Client, StatusCode};
     use serde_json::Value;
@@ -316,6 +715,10 @@ mod tests {
                         "last_updated":"2026-08-10T00:00:00Z"
                     }]))
                 }),
+            )
+            .route(
+                "/api/services/light/turn_on",
+                route_post(|| async { Json(json!({"raw_secret":"must-not-leak"})) }),
             );
         let (origin, task) = serve(router).await;
         (url::Url::parse(&origin).unwrap(), task)
@@ -344,7 +747,8 @@ mod tests {
                     "homeassistant/expose_entity/list" => json!({
                         "exposed_entities":{
                             "sensor.allowed":{"conversation":true},
-                            "camera.front_door":{"conversation":true}
+                            "camera.front_door":{"conversation":true},
+                            "light.kitchen":{"conversation":true}
                         }
                     }),
                     "config/entity_registry/get_entries" => json!({"sensor.allowed":null}),
@@ -402,16 +806,147 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discovery_lists_only_the_home_assistant_tool() {
+    async fn discovery_lists_query_and_exec_with_distinct_annotations() {
         let (endpoint, task) = endpoint().await;
         let (_, response) = post(&endpoint, request("tools/list", "list", json!({}))).await;
-        assert_eq!(response["result"]["tools"][0]["name"], TOOL_NAME);
-        assert_eq!(response["result"]["tools"].as_array().unwrap().len(), 1);
+        let tools = response["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 2);
+        let query = tools.iter().find(|tool| tool["name"] == TOOL_NAME).unwrap();
+        let exec = tools
+            .iter()
+            .find(|tool| tool["name"] == EXEC_TOOL_NAME)
+            .unwrap();
+        assert_eq!(query["annotations"]["readOnlyHint"], true);
         assert_eq!(
-            response["result"]["tools"][0]["annotations"]["readOnlyHint"],
-            true
+            exec["annotations"],
+            json!({
+                "readOnlyHint":false,
+                "destructiveHint":true,
+                "idempotentHint":false,
+                "openWorldHint":true
+            })
         );
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn exec_discovery_has_the_exact_catalog_and_closed_input_schemas() {
+        let (endpoint, task) = endpoint().await;
+        let (_, discovery) = post(&endpoint, request("tools/list", "list", json!({}))).await;
+        let exec = discovery["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == EXEC_TOOL_NAME)
+            .unwrap();
+        let schema = &exec["inputSchema"];
+        let serialized = serde_json::to_string(schema).unwrap();
+        for action in [
+            "scene.activate",
+            "light.turn_on",
+            "light.turn_off",
+            "switch.turn_on",
+            "switch.turn_off",
+            "fan.turn_on",
+            "fan.turn_off",
+            "fan.set_percentage",
+            "cover.open",
+            "cover.close",
+            "cover.stop",
+            "cover.set_position",
+            "climate.turn_on",
+            "climate.turn_off",
+            "climate.set_temperature",
+            "media_player.turn_on",
+            "media_player.turn_off",
+            "media_player.play",
+            "media_player.pause",
+            "media_player.stop",
+            "media_player.volume_set",
+            "lock.lock",
+            "lock.unlock",
+        ] {
+            assert!(serialized.contains(action), "missing {action}");
+        }
+        assert_eq!(serialized.matches("additionalProperties").count(), 24);
+        assert!(serialized.contains("\"additionalProperties\":false"));
+        for forbidden in ["toggle", "confirmation", "preset", "source", "template"] {
+            assert!(!serialized.contains(forbidden));
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn exec_dispatches_a_fixed_control_and_never_returns_upstream_contents() {
+        let (home_assistant_origin, home_assistant_task) = home_assistant().await;
+        let (endpoint, task) = endpoint_for(home_assistant_origin).await;
+        let (_, response) = post(
+            &endpoint,
+            request(
+                "tools/call",
+                "exec",
+                json!({
+                    "name":EXEC_TOOL_NAME,
+                    "arguments":{
+                        "action":"light.turn_on",
+                        "input":{"entity_id":"light.kitchen","brightness_pct":75}
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            response["result"]["structuredContent"],
+            json!({
+                "action":"light.turn_on",
+                "entity_id":"light.kitchen",
+                "success":true
+            })
+        );
+        assert!(
+            !serde_json::to_string(&response)
+                .unwrap()
+                .contains("must-not-leak")
+        );
+
+        let (_, wrong_domain) = post(
+            &endpoint,
+            request(
+                "tools/call",
+                "wrong-domain",
+                json!({
+                    "name":EXEC_TOOL_NAME,
+                    "arguments":{
+                        "action":"lock.unlock",
+                        "input":{"entity_id":"light.kitchen"}
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            wrong_domain["result"]["structuredContent"]["error"]["code"],
+            "invalid_arguments"
+        );
+
+        let (_, unknown_field) = post(
+            &endpoint,
+            request(
+                "tools/call",
+                "unknown-field",
+                json!({
+                    "name":EXEC_TOOL_NAME,
+                    "arguments":{
+                        "action":"light.turn_off",
+                        "input":{"entity_id":"light.kitchen","service":"unlock"}
+                    }
+                }),
+            ),
+        )
+        .await;
+        assert!(unknown_field.get("error").is_some());
+        task.abort();
+        home_assistant_task.abort();
     }
 
     #[tokio::test]

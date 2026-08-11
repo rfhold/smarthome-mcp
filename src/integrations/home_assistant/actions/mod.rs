@@ -1,16 +1,22 @@
 mod camera_snapshot;
+mod controls;
 mod get_history;
 mod get_states;
 mod list_devices;
 mod list_entities;
 
 pub use camera_snapshot::CameraSnapshotInput;
+pub use controls::{
+    ClimateTemperatureInput, CoverPositionInput, EntityControlInput, FanPercentageInput,
+    LightTurnOnInput, MediaPlayerVolumeInput,
+};
 pub use get_history::GetHistoryInput;
 pub use get_states::GetStatesInput;
 pub use list_devices::ListDevicesInput;
 pub use list_entities::ListEntitiesInput;
 
 pub(crate) use camera_snapshot::CameraSnapshotQuery;
+pub(crate) use controls::{Control, ControlAction};
 pub(crate) use get_history::HistoryQuery;
 pub(crate) use get_states::StatesQuery;
 pub(crate) use list_devices::DevicesQuery;

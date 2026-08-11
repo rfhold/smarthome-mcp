@@ -24,12 +24,12 @@ impl Error {
             ),
             Self::CapacityExhausted => (
                 "capacity_exhausted",
-                "Home Assistant query capacity is currently exhausted.".to_owned(),
+                "Home Assistant operation capacity is currently exhausted.".to_owned(),
                 true,
             ),
             Self::Timeout => (
                 "timeout",
-                "The Home Assistant query timed out.".to_owned(),
+                "The Home Assistant operation timed out.".to_owned(),
                 true,
             ),
             Self::Unauthorized => (
@@ -49,7 +49,7 @@ impl Error {
             ),
             Self::RequestRejected => (
                 "request_rejected",
-                "Home Assistant rejected the query.".to_owned(),
+                "Home Assistant rejected the operation.".to_owned(),
                 false,
             ),
             Self::UpstreamUnavailable => (
@@ -69,5 +69,43 @@ impl Error {
             ),
         };
         ToolError::new(code, message, retryable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shared_safe_errors_are_operation_neutral() {
+        for (error, code, message, retryable) in [
+            (
+                Error::CapacityExhausted,
+                "capacity_exhausted",
+                "Home Assistant operation capacity is currently exhausted.",
+                true,
+            ),
+            (
+                Error::Timeout,
+                "timeout",
+                "The Home Assistant operation timed out.",
+                true,
+            ),
+            (
+                Error::RequestRejected,
+                "request_rejected",
+                "Home Assistant rejected the operation.",
+                false,
+            ),
+        ] {
+            let value = error
+                .into_tool_error("control entity")
+                .into_mcp_result()
+                .raw;
+            assert_eq!(value["structuredContent"]["error"]["code"], code);
+            assert_eq!(value["structuredContent"]["error"]["message"], message);
+            assert_eq!(value["structuredContent"]["error"]["retryable"], retryable);
+            assert!(!serde_json::to_string(&value).unwrap().contains("query"));
+        }
     }
 }

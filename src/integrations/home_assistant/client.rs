@@ -24,7 +24,7 @@ use crate::{config::Secret, http_client};
 use super::{
     Error,
     actions::{
-        CameraSnapshotQuery, DevicesQuery, EntitiesQuery, HistoryQuery, StatesQuery,
+        CameraSnapshotQuery, Control, DevicesQuery, EntitiesQuery, HistoryQuery, StatesQuery,
         valid_entity_id,
     },
     telemetry::{MetricsGuard, request_outcome},
@@ -476,6 +476,38 @@ impl HomeAssistantClient {
         result
     }
 
+    pub(crate) async fn execute_control(&self, control: &Control) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let action = control.action();
+        let mut metrics = MetricsGuard::new(action);
+        let span = tracing::info_span!(
+            target: "smarthome_mcp::home_assistant",
+            "home_assistant.exec",
+            action,
+            outcome = tracing::field::Empty,
+        );
+        let result = tokio::time::timeout(self.timeout, async {
+            let exposed = self.exposed_entities().await?;
+            let entity_id = control.entity_id().to_owned();
+            self.authorize(std::slice::from_ref(&entity_id), &exposed)?;
+            let (domain, service) = control.service();
+            let url = self.endpoint(&["api", "services", domain, service])?;
+            self.post_json(url, &control.service_data()).await?;
+            Ok(json!({
+                "action": control.action(),
+                "entity_id": control.entity_id(),
+                "success": true,
+            }))
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        let outcome = request_outcome(&result);
+        span.record("outcome", outcome);
+        metrics.finish(outcome);
+        result
+    }
+
     fn admit(&self) -> Result<OwnedSemaphorePermit, Error> {
         self.concurrency
             .clone()
@@ -573,6 +605,31 @@ impl HomeAssistantClient {
             _ => return Err(Error::InvalidResponse),
         };
         Ok((mime_type, body))
+    }
+
+    async fn post_json(&self, url: Url, body: &Value) -> Result<(), Error> {
+        let mut request_span = http_client::RequestSpan::new(&reqwest::Method::POST);
+        let body = serde_json::to_vec(body).map_err(|_| Error::InvalidArguments)?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(self.token.expose())
+            .header(reqwest::header::ACCEPT, "application/json")
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .with_extension(request_span.extension())
+            .send()
+            .instrument(request_span.span())
+            .await
+            .map_err(|_| {
+                request_span.transport_error();
+                Error::UpstreamUnavailable
+            })?;
+        let body_span = request_span.span();
+        let _ = read_body(response, &mut request_span)
+            .instrument(body_span)
+            .await?;
+        Ok(())
     }
 
     async fn open_websocket(&self) -> Result<HomeAssistantSocket, Error> {
@@ -1030,7 +1087,7 @@ mod tests {
         extract::{OriginalUri, Path, State, WebSocketUpgrade, ws},
         http::{HeaderMap, StatusCode},
         response::{IntoResponse, Response},
-        routing::get,
+        routing::{get, post},
     };
     use chrono::{DateTime, Utc};
     use opentelemetry::{
@@ -1044,6 +1101,10 @@ mod tests {
     use tokio::{net::TcpListener, sync::Notify, task::JoinHandle};
     use tracing::instrument::WithSubscriber as _;
     use tracing_subscriber::layer::SubscriberExt as _;
+
+    use crate::integrations::home_assistant::actions::{
+        ControlAction, EntityControlInput, LightTurnOnInput,
+    };
 
     use super::*;
 
@@ -1073,9 +1134,13 @@ mod tests {
         camera_delay: Option<Duration>,
         camera_declared_length: Option<u64>,
         camera_streamed: bool,
+        service_status: StatusCode,
+        service_body: Vec<u8>,
+        service_delay: Option<Duration>,
         websocket_calls: Arc<AtomicUsize>,
         state_calls: Arc<AtomicUsize>,
         camera_calls: Arc<AtomicUsize>,
+        service_calls: Arc<AtomicUsize>,
         requests: Arc<Mutex<Vec<String>>>,
         commands: Arc<Mutex<Vec<Value>>>,
         traceparents: Arc<Mutex<Vec<String>>>,
@@ -1100,9 +1165,13 @@ mod tests {
                 camera_delay: None,
                 camera_declared_length: None,
                 camera_streamed: false,
+                service_status: StatusCode::OK,
+                service_body: b"[{\"must_not_leak\":true}]".to_vec(),
+                service_delay: None,
                 websocket_calls: Arc::new(AtomicUsize::new(0)),
                 state_calls: Arc::new(AtomicUsize::new(0)),
                 camera_calls: Arc::new(AtomicUsize::new(0)),
+                service_calls: Arc::new(AtomicUsize::new(0)),
                 requests: Arc::new(Mutex::new(Vec::new())),
                 commands: Arc::new(Mutex::new(Vec::new())),
                 traceparents: Arc::new(Mutex::new(Vec::new())),
@@ -1164,6 +1233,16 @@ mod tests {
 
         fn with_registry_response(mut self, command: &'static str, response: Value) -> Self {
             self.registry_response_overrides.insert(command, response);
+            self
+        }
+
+        fn with_service_status(mut self, status: StatusCode) -> Self {
+            self.service_status = status;
+            self
+        }
+
+        fn with_service_delay(mut self, delay: Duration) -> Self {
+            self.service_delay = Some(delay);
             self
         }
     }
@@ -1733,6 +1812,241 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn control_refreshes_exposure_then_uses_only_the_fixed_authenticated_post() {
+        let mock =
+            MockHomeAssistant::new(exposure(&[("light.kitchen", true)]), json!([]), json!([]));
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        let control = LightTurnOnInput {
+            entity_id: "light.kitchen".to_owned(),
+            brightness_pct: Some(75),
+        }
+        .validate()
+        .unwrap();
+
+        for _ in 0..2 {
+            assert_eq!(
+                client.execute_control(&control).await.unwrap(),
+                json!({
+                    "action":"light.turn_on",
+                    "entity_id":"light.kitchen",
+                    "success":true
+                })
+            );
+        }
+
+        assert_eq!(mock.websocket_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(mock.service_calls.load(Ordering::Relaxed), 2);
+        assert_eq!(
+            mock.requests.lock().unwrap().as_slice(),
+            [
+                "ws-auth:test-token",
+                "ws-command:1:homeassistant/expose_entity/list",
+                "http-auth:Bearer test-token",
+                "service:/api/services/light/turn_on",
+                "service-content-type:application/json",
+                "service-body:{\"brightness_pct\":75,\"entity_id\":\"light.kitchen\"}",
+                "ws-auth:test-token",
+                "ws-command:1:homeassistant/expose_entity/list",
+                "http-auth:Bearer test-token",
+                "service:/api/services/light/turn_on",
+                "service-content-type:application/json",
+                "service-body:{\"brightness_pct\":75,\"entity_id\":\"light.kitchen\"}",
+            ]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn control_denies_unexposed_entities_before_posting() {
+        let mock = MockHomeAssistant::new(
+            exposure(&[("lock.front_door", false)]),
+            json!([]),
+            json!([]),
+        );
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        let control = EntityControlInput {
+            entity_id: "lock.front_door".to_owned(),
+        }
+        .validate(ControlAction::LockUnlock)
+        .unwrap();
+
+        assert_eq!(
+            client.execute_control(&control).await,
+            Err(Error::NotAllowed)
+        );
+        assert_eq!(mock.websocket_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(mock.service_calls.load(Ordering::Relaxed), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn control_fails_closed_on_malformed_exposure_without_posting() {
+        let mock = MockHomeAssistant::new(
+            json!({
+                "id":2,
+                "type":"result",
+                "success":true,
+                "result":{"exposed_entities":{"lock.front_door":{"conversation":true}}}
+            }),
+            json!([]),
+            json!([]),
+        );
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+
+        assert_eq!(
+            client.execute_control(&lock_control()).await,
+            Err(Error::InvalidResponse)
+        );
+        assert_eq!(mock.websocket_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(mock.service_calls.load(Ordering::Relaxed), 0);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn control_preserves_status_redirect_timeout_and_capacity_behavior() {
+        for (status, expected) in [
+            (StatusCode::UNAUTHORIZED, Error::Unauthorized),
+            (StatusCode::FORBIDDEN, Error::Unauthorized),
+            (StatusCode::NOT_FOUND, Error::NotFound),
+            (StatusCode::TOO_MANY_REQUESTS, Error::CapacityExhausted),
+            (StatusCode::BAD_REQUEST, Error::RequestRejected),
+            (StatusCode::FOUND, Error::UpstreamUnavailable),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Error::UpstreamUnavailable,
+            ),
+        ] {
+            let mock = MockHomeAssistant::new(
+                exposure(&[("lock.front_door", true)]),
+                json!([]),
+                json!([]),
+            )
+            .with_service_status(status);
+            let (origin, server) = serve(mock.clone()).await;
+            let client = HomeAssistantClient::for_test(
+                origin,
+                Secret("test-token".to_owned()),
+                Duration::from_secs(2),
+            );
+            assert_eq!(client.execute_control(&lock_control()).await, Err(expected));
+            assert_eq!(mock.service_calls.load(Ordering::Relaxed), 1);
+            if status.is_redirection() {
+                assert_eq!(mock.state_calls.load(Ordering::Relaxed), 0);
+            }
+            server.abort();
+        }
+
+        let delayed =
+            MockHomeAssistant::new(exposure(&[("lock.front_door", true)]), json!([]), json!([]))
+                .with_service_delay(Duration::from_secs(1));
+        let (origin, server) = serve(delayed).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_millis(50),
+        );
+        assert_eq!(
+            client.execute_control(&lock_control()).await,
+            Err(Error::Timeout)
+        );
+        let permits = (0..MAX_CONCURRENT_QUERIES)
+            .map(|_| client.admit().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(permits.len(), MAX_CONCURRENT_QUERIES);
+        drop(permits);
+        server.abort();
+
+        let client = HomeAssistantClient::for_test(
+            Url::parse("http://127.0.0.1:1/").unwrap(),
+            Secret("test-token".to_owned()),
+            Duration::from_millis(50),
+        );
+        let mut permits = (0..MAX_CONCURRENT_QUERIES)
+            .map(|_| client.admit().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            client.execute_control(&lock_control()).await,
+            Err(Error::CapacityExhausted)
+        );
+        permits.pop();
+        assert_eq!(
+            client.execute_control(&lock_control()).await,
+            Err(Error::UpstreamUnavailable)
+        );
+        assert!(client.admit().is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancelling_control_releases_its_permit() {
+        let mock =
+            MockHomeAssistant::new(exposure(&[("lock.front_door", true)]), json!([]), json!([]))
+                .with_service_delay(Duration::from_secs(5));
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(10),
+        );
+        let running_client = client.clone();
+        let running =
+            tokio::spawn(async move { running_client.execute_control(&lock_control()).await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while mock.service_calls.load(Ordering::Relaxed) == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        running.abort();
+        assert!(matches!(running.await, Err(error) if error.is_cancelled()));
+
+        let permits = (0..MAX_CONCURRENT_QUERIES)
+            .map(|_| client.admit().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(permits.len(), MAX_CONCURRENT_QUERIES);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn control_discards_success_bodies_but_still_enforces_the_response_limit() {
+        let mut mock =
+            MockHomeAssistant::new(exposure(&[("switch.office", true)]), json!([]), json!([]));
+        mock.service_body = vec![b'x'; MAX_RESPONSE_BYTES + 1];
+        let (origin, server) = serve(mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        let control = EntityControlInput {
+            entity_id: "switch.office".to_owned(),
+        }
+        .validate(ControlAction::SwitchTurnOn)
+        .unwrap();
+
+        assert_eq!(
+            client.execute_control(&control).await,
+            Err(Error::ResponseTooLarge)
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn camera_snapshot_denies_unexposed_entities_before_the_image_get() {
         let mock = MockHomeAssistant::new(
             exposure(&[("camera.front_door", false)]),
@@ -2224,6 +2538,14 @@ mod tests {
             invalid_snapshot_result,
             Err(Error::InvalidResponse)
         ));
+        let control_mock = MockHomeAssistant::new(
+            exposure(&[("light.private_fixture", true)]),
+            json!([]),
+            json!([]),
+        );
+        let (control_result, control_traceparent) =
+            traced_control(control_mock, Duration::from_secs(2), &dispatch).await;
+        assert!(control_result.is_ok());
 
         provider.force_flush().unwrap();
         let spans = exporter.get_finished_spans().unwrap();
@@ -2231,12 +2553,17 @@ mod tests {
             .iter()
             .filter(|span| span.name == "home_assistant.query")
             .collect::<Vec<_>>();
+        let exec_spans = spans
+            .iter()
+            .filter(|span| span.name == "home_assistant.exec")
+            .collect::<Vec<_>>();
         let client_spans = spans
             .iter()
             .filter(|span| span.name == "http.client.request")
             .collect::<Vec<_>>();
         assert_eq!(query_spans.len(), 6);
-        assert_eq!(client_spans.len(), 6);
+        assert_eq!(exec_spans.len(), 1);
+        assert_eq!(client_spans.len(), 7);
 
         for traceparent in [
             success_traceparent,
@@ -2245,23 +2572,48 @@ mod tests {
             cancelled_traceparent,
             snapshot_traceparent,
             invalid_snapshot_traceparent,
+            control_traceparent,
         ] {
             assert_traceparent_matches_client_span(&traceparent, &client_spans);
         }
 
         for client_span in &client_spans {
             assert_eq!(client_span.span_kind, SpanKind::Client);
-            assert!(query_spans.iter().any(|query_span| {
-                client_span.parent_span_id == query_span.span_context.span_id()
-                    && client_span.span_context.trace_id() == query_span.span_context.trace_id()
+            assert!(query_spans.iter().chain(&exec_spans).any(|operation_span| {
+                client_span.parent_span_id == operation_span.span_context.span_id()
+                    && client_span.span_context.trace_id() == operation_span.span_context.trace_id()
             }));
-            assert_eq!(
-                span_attribute(client_span, "http.request.method").as_deref(),
-                Some("GET")
-            );
             assert!(span_attribute(client_span, "outcome").is_some_and(|value| !value.is_empty()));
             assert_span_is_privacy_bounded(client_span);
         }
+        assert_eq!(
+            client_spans
+                .iter()
+                .filter(
+                    |span| span_attribute(span, "http.request.method").as_deref() == Some("GET")
+                )
+                .count(),
+            6
+        );
+        let post_span = client_spans
+            .iter()
+            .copied()
+            .find(|span| span_attribute(span, "http.request.method").as_deref() == Some("POST"))
+            .unwrap();
+        assert_eq!(
+            span_attribute(post_span, "outcome").as_deref(),
+            Some("success")
+        );
+        let exec_span = exec_spans[0];
+        assert_eq!(
+            span_attribute(exec_span, "action").as_deref(),
+            Some("light.turn_on")
+        );
+        assert_eq!(
+            span_attribute(exec_span, "outcome").as_deref(),
+            Some("success")
+        );
+        assert_span_is_privacy_bounded(exec_span);
 
         let success_span = client_span(&client_spans, "200", "success");
         assert_eq!(success_span.status, Status::Unset);
@@ -2313,6 +2665,33 @@ mod tests {
         );
         let result = client
             .camera_snapshot(&camera_query())
+            .with_subscriber(dispatch.clone())
+            .await;
+        let traceparents = mock.traceparents.lock().unwrap().clone();
+        server.abort();
+        assert_eq!(traceparents.len(), 1);
+        (result, traceparents.into_iter().next().unwrap())
+    }
+
+    async fn traced_control(
+        mock: MockHomeAssistant,
+        timeout: Duration,
+        dispatch: &tracing::Dispatch,
+    ) -> (Result<Value, Error>, String) {
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("sensitive-control-token".to_owned()),
+            timeout,
+        );
+        let control = LightTurnOnInput {
+            entity_id: "light.private_fixture".to_owned(),
+            brightness_pct: Some(75),
+        }
+        .validate()
+        .unwrap();
+        let result = client
+            .execute_control(&control)
             .with_subscriber(dispatch.clone())
             .await;
         let traceparents = mock.traceparents.lock().unwrap().clone();
@@ -2385,6 +2764,11 @@ mod tests {
             "image/jpeg",
             "application/json",
             "sensitive-camera-body",
+            "sensitive-control-token",
+            "/api/services",
+            "light.private_fixture",
+            "brightness_pct",
+            "must_not_leak",
             "authorization",
             "url.",
             "server.",
@@ -2662,6 +3046,14 @@ mod tests {
         }
     }
 
+    fn lock_control() -> Control {
+        EntityControlInput {
+            entity_id: "lock.front_door".to_owned(),
+        }
+        .validate(ControlAction::LockUnlock)
+        .unwrap()
+    }
+
     async fn serve(mock: MockHomeAssistant) -> (Url, JoinHandle<()>) {
         let app = Router::new()
             .route("/api/websocket", get(websocket))
@@ -2669,6 +3061,7 @@ mod tests {
             .route("/api/states/{entity_id}", get(one_state))
             .route("/api/camera_proxy/{entity_id}", get(camera_snapshot))
             .route("/api/history/period/{start}", get(history))
+            .route("/api/services/{domain}/{service}", post(service_call))
             .with_state(mock);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -2839,6 +3232,39 @@ mod tests {
             Body::from_stream(futures_util::stream::iter(chunks))
         } else {
             Body::from(mock.camera_body)
+        };
+        response.body(body).unwrap()
+    }
+
+    async fn service_call(
+        State(mock): State<MockHomeAssistant>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response {
+        record_http_auth(&mock, &headers);
+        mock.service_calls.fetch_add(1, Ordering::Relaxed);
+        let content_type = headers
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        let mut requests = mock.requests.lock().unwrap();
+        requests.push(format!("service:{uri}"));
+        requests.push(format!("service-content-type:{content_type}"));
+        requests.push(format!("service-body:{}", String::from_utf8_lossy(&body)));
+        drop(requests);
+        let mut response = Response::builder().status(mock.service_status);
+        if mock.service_status.is_redirection() {
+            response = response.header(reqwest::header::LOCATION, "/api/states");
+        }
+        let body = if let Some(delay) = mock.service_delay {
+            let body = mock.service_body.clone();
+            Body::from_stream(futures_util::stream::once(async move {
+                tokio::time::sleep(delay).await;
+                Ok::<_, std::io::Error>(Bytes::from(body))
+            }))
+        } else {
+            Body::from(mock.service_body)
         };
         response.body(body).unwrap()
     }

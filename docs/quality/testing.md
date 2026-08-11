@@ -31,8 +31,8 @@ Run `git diff --check` before finalizing changes.
 | --- | --- |
 | Configuration and host | Strict environment parsing, Home Assistant origin policy, keyring parsing, health, readiness, and cancellation-safe HTTP metrics. |
 | OAuth and OIDC seams | Exact `mcp:use` resource consent, `openid profile email` configuration, and stable issuer-plus-subject principal mapping. |
-| MCP contract | Progressive discovery, dotted actions, legacy-action rejection, one read-only tool, annotations, schema validation, and safe semantic errors. |
-| Home Assistant inputs | Entity IDs, domain/search limits, entity and device-list limits, entity counts, RFC3339 history ranges, defaults, and 24-hour cap. |
+| MCP contract | Progressive discovery, dotted actions, legacy-action rejection, separate query and execution tools, annotations, schema validation, and safe semantic errors. |
+| Home Assistant inputs | Entity IDs, domain/search limits, entity and device-list limits, entity counts, RFC3339 history ranges, defaults, read limits, and bounded common-control values. |
 | Home Assistant normalization | Approved state metadata only; device and effective-area enrichment is bounded; arbitrary attributes and raw registry data are omitted. |
 | Home Assistant telemetry | Fixed action/outcome labels and cancellation-safe counters. |
 | Pulumi | Immutable images, HTTPS origins, wrapping-key policy, Home Assistant process-secret propagation, Authentik, CNPG/backups, workload hardening, egress, Service, route, and safe outputs. |
@@ -59,6 +59,13 @@ Tests must cover the [Home Assistant specifications](../home-assistant/README.md
 - camera error mapping, timeouts, cancellation, capacity exhaustion, and permit release;
 - progressive camera discovery, namespace help, tool annotations, and response filtering;
 - camera privacy across errors, logs, traces, and metrics, including absence of identifiers, image data, paths, MIME, authentication data, headers, bodies, and raw errors;
+- separate `home_assistant_exec` discovery and annotations with read-only false, destructive true, idempotent false, and open-world true;
+- the complete [common-control action catalog](../home-assistant/common-controls.md), matching-domain single-entity targeting, unknown-field rejection, and every numeric boundary;
+- fresh exact `conversation: true` exposure before every mutation, with no service POST on denied or malformed exposure;
+- fixed action-to-service POST mapping and bounded constructed JSON, with no caller-selected service, domain, path, method, headers, origin, or arbitrary data;
+- bounded upstream result consumption and minimal output without upstream wrappers, state, context, or service-response data;
+- rejection of batching, toggle, confirmations, presets, sources, modes, colors, templates, and unapproved actions;
+- endpoint-wide `mcp:use` authority for both tools, including existing valid tokens and no extra confirmation for `lock.unlock` or `cover.open`;
 - redirect denial, body/frame/URL/time/concurrency bounds, cancellation, and permit release; and
 - stable source-free error codes without URLs, credentials, bodies, entity IDs, or state data.
 
@@ -78,9 +85,9 @@ Before preview acceptance, record separate evidence for:
 | --- | --- |
 | PostgreSQL | Embedded migrations, expiry, one-shot state, replay prevention, refresh rotation, and encrypted signing-key persistence against a disposable database. |
 | Authentik | Discovery, browser login, callback validation, and local token issuance. |
-| Kuri client | DCR, CIMD, loopback authorization, refresh, exact resource binding, and `home_assistant_query`. |
-| Home Assistant | Controlled WebSocket exposure and REST state, history, and camera proxy reads for non-sensitive fixtures. |
+| Kuri client | DCR, CIMD, loopback authorization, refresh, exact resource binding, `home_assistant_query`, and `home_assistant_exec`. |
+| Home Assistant | Controlled WebSocket exposure, REST state, history, and camera proxy reads, and fixed service calls for non-sensitive fixtures. |
 | Container | Multi-architecture build, UID, revision label, private-material inspection, and startup with controlled dependencies. |
-| Preview | Authorized browser login, authenticated `/mcp`, bounded HA reads, telemetry, probes, and secret non-disclosure. |
+| Preview | Authorized browser login, authenticated `/mcp`, bounded HA reads and common controls, telemetry, probes, and secret non-disclosure. |
 
 Production additionally requires image and stack review, credential and wrapping-key rotation exercises, backup restoration, and recovery objectives. No external evidence is currently claimed.

@@ -4,7 +4,7 @@
 
 Preview was first deployed from commit `cb02f24` on 2026-08-10 by PipelineRun `smarthome-mcp-preview-r8hf7`. All seven pipeline tasks succeeded. The resulting Deployment was ready at one replica, CloudNativePG reported a healthy cluster, and the HTTPRoute reported accepted and resolved references. Production remains declaration-only, although its Home Assistant Stashes have been seeded.
 
-Bounded public smoke checks returned HTTP 200 from `/health` and `/ready`. An unauthenticated MCP initialize request returned HTTP 401 with the scope configured before this local contract change. Both OAuth metadata documents returned the configured preview resource and issuer. No live validation of `mcp:use`, an authenticated tool invocation, browser OIDC flow, telemetry-backend delivery, backup restore, or production deployment is claimed.
+Bounded public smoke checks returned HTTP 200 from `/health` and `/ready`. An unauthenticated MCP initialize request returned HTTP 401 with the scope configured before this local contract change. Both OAuth metadata documents returned the configured preview resource and issuer. No live validation of `mcp:use`, an authenticated query or control invocation, browser OIDC flow, telemetry-backend delivery, backup restore, or production deployment is claimed.
 
 ## Stack Targets
 
@@ -74,11 +74,11 @@ The Pulumi step requires `pulumi-credentials`, `authentik-credentials`, and `tek
 
 The runtime serves stateless MCP Streamable HTTP revision `2026-07-28` at exact resource `/mcp`. It supports DCR, hardened CIMD, and native loopback clients through PostgreSQL-backed OAuth state.
 
-One progressive read-only tool, `home_assistant_query`, exposes `entity.list`, `device.list`, `state.get`, `history.get`, and `camera.snapshot`. Each action performs a fresh Assist exposure lookup over Home Assistant WebSocket and permits only explicit `conversation: true` entries before using fixed upstream reads. See the [Home Assistant specifications](../home-assistant/README.md).
+The runtime contract has two progressive tools. The unchanged read-only `home_assistant_query` exposes `entity.list`, `device.list`, `state.get`, `history.get`, and `camera.snapshot`. `home_assistant_exec` exposes only the fixed common controls. Each action performs a fresh Assist exposure lookup over Home Assistant WebSocket and requires explicit `conversation: true` for the exact target before a fixed upstream read or service POST. See the [Home Assistant specifications](../home-assistant/README.md).
 
-Controls, service calls, native Home Assistant MCP bridging, and arbitrary HTTP access are not deployed capabilities.
+Arbitrary service calls, native Home Assistant MCP bridging, and arbitrary HTTP access are not runtime capabilities. The existing endpoint-wide `mcp:use` scope authorizes both tools; no per-tool scope or extra confirmation protects `lock.unlock` or `cover.open`.
 
-Camera snapshot support requires no infrastructure resource, deployment manifest, runtime configuration, OAuth configuration, or Kuri revision change.
+Camera snapshot and common-control support require no additional infrastructure resource, deployment manifest, runtime configuration, OAuth configuration, or per-tool grant. The recorded preview evidence above predates live authenticated validation of these contracts.
 
 ## Availability and Data
 
