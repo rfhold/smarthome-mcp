@@ -83,6 +83,16 @@ fn metric_action(value: &'static str) -> &'static str {
         "state.get" => "state.get",
         "history.get" => "history.get",
         "camera.snapshot" => "camera.snapshot",
+        "network.list" => "network.list",
+        "router.discover" => "router.discover",
+        "thread.readiness.get" => "thread.readiness.get",
+        "network.set_preferred" => "network.set_preferred",
+        "router.set_preferred" => "router.set_preferred",
+        "matter.readiness.get" => "matter.readiness.get",
+        "matter.device.list" => "matter.device.list",
+        "device.diagnostics" => "device.diagnostics",
+        "device.ping" => "device.ping",
+        "device.interview" => "device.interview",
         "scene.activate" => "scene.activate",
         "light.turn_on" => "light.turn_on",
         "light.turn_off" => "light.turn_off",
@@ -117,6 +127,7 @@ fn metric_outcome(value: &'static str) -> &'static str {
         | "timeout"
         | "unauthorized"
         | "not_allowed"
+        | "not_matter_device"
         | "not_found"
         | "request_rejected"
         | "upstream_unavailable"
@@ -135,6 +146,7 @@ pub(super) fn request_outcome<T>(result: &Result<T, Error>) -> &'static str {
         Err(Error::Timeout) => "timeout",
         Err(Error::Unauthorized) => "unauthorized",
         Err(Error::NotAllowed) => "not_allowed",
+        Err(Error::NotMatterDevice) => "not_matter_device",
         Err(Error::NotFound) => "not_found",
         Err(Error::RequestRejected) => "request_rejected",
         Err(Error::UpstreamUnavailable) => "upstream_unavailable",
@@ -155,6 +167,16 @@ mod tests {
             "state.get",
             "history.get",
             "camera.snapshot",
+            "network.list",
+            "router.discover",
+            "thread.readiness.get",
+            "network.set_preferred",
+            "router.set_preferred",
+            "matter.readiness.get",
+            "matter.device.list",
+            "device.diagnostics",
+            "device.ping",
+            "device.interview",
             "scene.activate",
             "light.turn_on",
             "light.turn_off",
@@ -186,5 +208,6 @@ mod tests {
         let mut guard = MetricsGuard::new("attacker-controlled");
         assert_eq!(guard.action, "unknown");
         guard.finish("attacker-controlled");
+        assert_eq!(metric_outcome("not_matter_device"), "not_matter_device");
     }
 }

@@ -1,6 +1,6 @@
 # Home Assistant Common Controls
 
-`home_assistant_exec` is the only execution tool. Its MCP annotations are `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, and `openWorldHint: true`. The existing `mcp:use` scope authorizes this tool as well as `home_assistant_query`; there is no per-tool OAuth scope.
+`home_assistant_exec` is the entity execution tool. Its MCP annotations are `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, and `openWorldHint: true`. The endpoint-wide `mcp:use` scope authorizes every tool; there is no per-tool OAuth scope.
 
 ## Actions
 

@@ -14,7 +14,9 @@ use tokio::net::TcpStream;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async_with_config,
-    tungstenite::{Message, protocol::WebSocketConfig},
+    tungstenite::{
+        Error as WebSocketError, Message, error::CapacityError, protocol::WebSocketConfig,
+    },
 };
 use tracing::Instrument as _;
 use url::Url;
@@ -24,8 +26,9 @@ use crate::{config::Secret, http_client};
 use super::{
     Error,
     actions::{
-        CameraSnapshotQuery, Control, DevicesQuery, EntitiesQuery, HistoryQuery, StatesQuery,
-        valid_entity_id,
+        CameraSnapshotQuery, Control, DevicesQuery, EntitiesQuery, HistoryQuery, MatterDeviceQuery,
+        MatterDevicesQuery, PreferredDatasetCommand, PreferredRouterCommand, RouterDiscoveryQuery,
+        StatesQuery, valid_entity_id,
     },
     telemetry::{MetricsGuard, request_outcome},
 };
@@ -43,6 +46,18 @@ const MAX_DEVICE_CLASS_BYTES: usize = 128;
 const MAX_UNIT_BYTES: usize = 64;
 const MAX_REGISTRY_ID_BYTES: usize = 255;
 const MAX_REGISTRY_NAME_BYTES: usize = 256;
+const MAX_THREAD_ITEMS: usize = 100;
+const MAX_ROUTER_ADDRESSES: usize = 16;
+const MAX_MATTER_IP_ADDRESSES: usize = 16;
+const MAX_SHORT_TEXT_BYTES: usize = 256;
+
+const THREAD_LIST_DATASETS: &str = "thread/list_datasets";
+const THREAD_DISCOVER_ROUTERS: &str = "thread/discover_routers";
+const THREAD_SET_PREFERRED_DATASET: &str = "thread/set_preferred_dataset";
+const THREAD_SET_PREFERRED_ROUTER: &str = "thread/set_preferred_border_agent";
+const MATTER_NODE_DIAGNOSTICS: &str = "matter/node_diagnostics";
+const MATTER_PING_NODE: &str = "matter/ping_node";
+const MATTER_INTERVIEW_NODE: &str = "matter/interview_node";
 
 type HomeAssistantSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -143,6 +158,62 @@ struct HistoryState {
 struct EntityHistory {
     entity_id: String,
     states: Vec<HistoryState>,
+}
+
+#[derive(Debug, Serialize)]
+struct ThreadDataset {
+    channel: Option<u16>,
+    created: String,
+    dataset_id: String,
+    extended_pan_id: String,
+    network_name: Option<String>,
+    pan_id: Option<String>,
+    preferred: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preferred_border_agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preferred_extended_address: Option<String>,
+    source: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ThreadRouter {
+    key: String,
+    instance_name: String,
+    addresses: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    border_agent_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    brand: Option<String>,
+    extended_address: String,
+    extended_pan_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    network_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    server: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    unconfigured: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    vendor_name: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct MatterDevice {
+    device_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    manufacturer: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    area_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    area_name: Option<String>,
 }
 
 pub(crate) struct CameraSnapshot {
@@ -476,6 +547,237 @@ impl HomeAssistantClient {
         result
     }
 
+    pub(crate) async fn list_thread_networks(&self) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let mut metrics = MetricsGuard::new("network.list");
+        let span = operation_span("home_assistant.query", "network.list");
+        let result = tokio::time::timeout(self.timeout, async {
+            let mut socket = self.open_websocket().await?;
+            let datasets = self.thread_datasets(&mut socket, 1).await?;
+            let _ = socket.close(None).await;
+            bounded_output(json!({"action":"network.list", "networks":datasets}))
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
+    pub(crate) async fn discover_thread_routers(
+        &self,
+        query: &RouterDiscoveryQuery,
+    ) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let mut metrics = MetricsGuard::new("router.discover");
+        let span = operation_span("home_assistant.query", "router.discover");
+        let result = tokio::time::timeout(self.timeout, async {
+            let mut socket = self.open_websocket().await?;
+            let routers = self
+                .thread_routers(&mut socket, query.duration_seconds, 1)
+                .await?;
+            let _ = socket.close(None).await;
+            bounded_output(json!({
+                "action":"router.discover",
+                "duration_seconds":query.duration_seconds,
+                "routers":routers,
+            }))
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
+    pub(crate) async fn thread_readiness(&self) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let mut metrics = MetricsGuard::new("thread.readiness.get");
+        let span = operation_span("home_assistant.query", "thread.readiness.get");
+        let result = tokio::time::timeout(self.timeout, async {
+            let mut socket = self.open_websocket().await?;
+            let datasets = self.thread_datasets(&mut socket, 1).await?;
+            let routers = self.thread_routers(&mut socket, 3, 2).await?;
+            let _ = socket.close(None).await;
+            let preferred = datasets
+                .iter()
+                .filter(|dataset| dataset.preferred)
+                .collect::<Vec<_>>();
+            let router_matches_preferred = preferred.first().map(|dataset| {
+                routers.iter().any(|router| {
+                    router.extended_pan_id == dataset.extended_pan_id
+                        || dataset.network_name.as_ref().is_some_and(|network_name| {
+                            router.network_name.as_deref() == Some(network_name.as_str())
+                        })
+                })
+            });
+            let mut issues = Vec::new();
+            if datasets.is_empty() {
+                issues.push("no_datasets");
+            }
+            if preferred.is_empty() {
+                issues.push("no_preferred_dataset");
+            }
+            if preferred.len() > 1 {
+                issues.push("multiple_preferred_datasets");
+            }
+            if routers.is_empty() {
+                issues.push("no_routers_discovered");
+            }
+            if router_matches_preferred == Some(false) {
+                issues.push("no_router_matches_preferred_network");
+            }
+            bounded_output(json!({
+                "action":"readiness.get",
+                "datasets_exist":!datasets.is_empty(),
+                "dataset_count":datasets.len(),
+                "preferred_dataset_count":preferred.len(),
+                "preferred_dataset_id":preferred.first().map(|dataset| dataset.dataset_id.as_str()),
+                "routers_discovered":!routers.is_empty(),
+                "router_count":routers.len(),
+                "router_matches_preferred_network":router_matches_preferred,
+                "issues":issues,
+            }))
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
+    pub(crate) async fn set_preferred_thread_dataset(
+        &self,
+        command: &PreferredDatasetCommand,
+    ) -> Result<Value, Error> {
+        self.fixed_websocket_ack(
+            "network.set_preferred",
+            json!({"id":1,"type":THREAD_SET_PREFERRED_DATASET,"dataset_id":command.dataset_id}),
+            json!({"action":"network.set_preferred","dataset_id":command.dataset_id,"success":true}),
+        )
+        .await
+    }
+
+    pub(crate) async fn set_preferred_thread_router(
+        &self,
+        command: &PreferredRouterCommand,
+    ) -> Result<Value, Error> {
+        self.fixed_websocket_ack(
+            "router.set_preferred",
+            json!({
+                "id":1,
+                "type":THREAD_SET_PREFERRED_ROUTER,
+                "dataset_id":command.dataset_id,
+                "border_agent_id":command.border_agent_id,
+                "extended_address":command.extended_address,
+            }),
+            json!({
+                "action":"router.set_preferred",
+                "dataset_id":command.dataset_id,
+                "success":true,
+            }),
+        )
+        .await
+    }
+
+    pub(crate) async fn list_matter_devices(
+        &self,
+        query: &MatterDevicesQuery,
+    ) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let mut metrics = MetricsGuard::new("matter.device.list");
+        let span = operation_span("home_assistant.query", "matter.device.list");
+        let result = tokio::time::timeout(self.timeout, async {
+            let mut socket = self.open_websocket().await?;
+            let (mut devices, total) = self.matter_devices(&mut socket).await?;
+            let truncated = devices.len() > query.limit;
+            devices.truncate(query.limit);
+            let _ = socket.close(None).await;
+            bounded_output(json!({
+                "action":"device.list",
+                "devices":devices,
+                "total":total,
+                "truncated":truncated,
+            }))
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
+    pub(crate) async fn matter_readiness(&self) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let mut metrics = MetricsGuard::new("matter.readiness.get");
+        let span = operation_span("home_assistant.query", "matter.readiness.get");
+        let result = tokio::time::timeout(self.timeout, async {
+            let mut socket = self.open_websocket().await?;
+            let (_, count) = self.matter_devices(&mut socket).await?;
+            let _ = socket.close(None).await;
+            bounded_output(json!({
+                "action":"readiness.get",
+                "device_registry_responsive":true,
+                "matter_device_count":count,
+                "issues":[],
+            }))
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
+    pub(crate) async fn matter_device_diagnostics(
+        &self,
+        query: &MatterDeviceQuery,
+    ) -> Result<Value, Error> {
+        self.matter_device_query(
+            "device.diagnostics",
+            MATTER_NODE_DIAGNOSTICS,
+            query,
+            normalize_diagnostics,
+        )
+        .await
+    }
+
+    pub(crate) async fn ping_matter_device(
+        &self,
+        query: &MatterDeviceQuery,
+    ) -> Result<Value, Error> {
+        self.matter_device_query("device.ping", MATTER_PING_NODE, query, normalize_ping)
+            .await
+    }
+
+    pub(crate) async fn interview_matter_device(
+        &self,
+        query: &MatterDeviceQuery,
+    ) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let action = "device.interview";
+        let mut metrics = MetricsGuard::new(action);
+        let span = operation_span("home_assistant.exec", action);
+        let result = tokio::time::timeout(self.timeout, async {
+            let mut socket = self.open_websocket().await?;
+            self.authorize_matter_device(&mut socket, 1, &query.device_id)
+                .await?;
+            self.websocket_command(
+                &mut socket,
+                2,
+                json!({"id":2,"type":MATTER_INTERVIEW_NODE,"device_id":query.device_id}),
+            )
+            .await?;
+            let _ = socket.close(None).await;
+            bounded_output(json!({"action":action,"device_id":query.device_id,"success":true}))
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
     pub(crate) async fn execute_control(&self, control: &Control) -> Result<Value, Error> {
         let _permit = self.admit()?;
         let action = control.action();
@@ -506,6 +808,269 @@ impl HomeAssistantClient {
         span.record("outcome", outcome);
         metrics.finish(outcome);
         result
+    }
+
+    async fn fixed_websocket_ack(
+        &self,
+        action: &'static str,
+        command: Value,
+        output: Value,
+    ) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let mut metrics = MetricsGuard::new(action);
+        let span = operation_span("home_assistant.exec", action);
+        let result = tokio::time::timeout(self.timeout, async {
+            let mut socket = self.open_websocket().await?;
+            self.websocket_command(&mut socket, 1, command).await?;
+            let _ = socket.close(None).await;
+            bounded_output(output)
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
+    async fn matter_device_query(
+        &self,
+        action: &'static str,
+        command_type: &'static str,
+        query: &MatterDeviceQuery,
+        normalize: fn(Value) -> Result<Value, Error>,
+    ) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let mut metrics = MetricsGuard::new(action);
+        let span = operation_span("home_assistant.query", action);
+        let result = tokio::time::timeout(self.timeout, async {
+            let mut socket = self.open_websocket().await?;
+            self.authorize_matter_device(&mut socket, 1, &query.device_id)
+                .await?;
+            let raw = self
+                .websocket_command(
+                    &mut socket,
+                    2,
+                    json!({"id":2,"type":command_type,"device_id":query.device_id}),
+                )
+                .await?;
+            let _ = socket.close(None).await;
+            let normalized = normalize(raw)?;
+            bounded_output(json!({
+                "action":action,
+                "device_id":query.device_id,
+                "result":normalized,
+            }))
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
+    async fn authorize_matter_device(
+        &self,
+        socket: &mut HomeAssistantSocket,
+        id: u64,
+        device_id: &str,
+    ) -> Result<(), Error> {
+        let raw_devices = self
+            .websocket_command(
+                socket,
+                id,
+                json!({"id":id,"type":"config/device_registry/list"}),
+            )
+            .await?;
+        let devices = raw_devices.as_array().ok_or(Error::InvalidResponse)?;
+        if devices.len() > 10_000 {
+            return Err(Error::ResponseTooLarge);
+        }
+        let mut matching = devices
+            .iter()
+            .filter(|value| value.get("id").and_then(Value::as_str) == Some(device_id));
+        let Some(device) = matching.next() else {
+            return Err(Error::NotMatterDevice);
+        };
+        if matching.next().is_some() {
+            return Err(Error::InvalidResponse);
+        }
+        let is_matter = device
+            .get("identifiers")
+            .and_then(Value::as_array)
+            .ok_or(Error::InvalidResponse)?
+            .iter()
+            .any(|identifier| {
+                identifier
+                    .as_array()
+                    .and_then(|parts| parts.first())
+                    .and_then(Value::as_str)
+                    == Some("matter")
+            });
+        if is_matter {
+            Ok(())
+        } else {
+            Err(Error::NotMatterDevice)
+        }
+    }
+
+    async fn thread_datasets(
+        &self,
+        socket: &mut HomeAssistantSocket,
+        id: u64,
+    ) -> Result<Vec<ThreadDataset>, Error> {
+        let result = self
+            .websocket_command(socket, id, json!({"id":id,"type":THREAD_LIST_DATASETS}))
+            .await?;
+        let values = result
+            .get("datasets")
+            .and_then(Value::as_array)
+            .ok_or(Error::InvalidResponse)?;
+        if values.len() > MAX_THREAD_ITEMS {
+            return Err(Error::ResponseTooLarge);
+        }
+        let mut datasets = values
+            .iter()
+            .map(normalize_dataset)
+            .collect::<Result<Vec<_>, _>>()?;
+        datasets.sort_by(|left, right| left.dataset_id.cmp(&right.dataset_id));
+        if datasets
+            .windows(2)
+            .any(|pair| pair[0].dataset_id == pair[1].dataset_id)
+        {
+            return Err(Error::InvalidResponse);
+        }
+        Ok(datasets)
+    }
+
+    async fn thread_routers(
+        &self,
+        socket: &mut HomeAssistantSocket,
+        duration_seconds: u8,
+        id: u64,
+    ) -> Result<Vec<ThreadRouter>, Error> {
+        self.websocket_command(socket, id, json!({"id":id,"type":THREAD_DISCOVER_ROUTERS}))
+            .await?;
+        let deadline =
+            tokio::time::Instant::now() + Duration::from_secs(u64::from(duration_seconds));
+        let mut routers = BTreeMap::new();
+        loop {
+            let message = match tokio::time::timeout_at(deadline, websocket_json(socket)).await {
+                Ok(result) => result?,
+                Err(_) => break,
+            };
+            apply_router_event(message, id, &mut routers)?;
+        }
+        let unsubscribe_id = id + 1;
+        socket
+            .send(Message::Text(
+                json!({"id":unsubscribe_id,"type":"unsubscribe_events","subscription":id})
+                    .to_string()
+                    .into(),
+            ))
+            .await
+            .map_err(|_| Error::UpstreamUnavailable)?;
+        loop {
+            let response = websocket_json(socket).await?;
+            if response.get("id").and_then(Value::as_u64) == Some(id) {
+                apply_router_event(response, id, &mut routers)?;
+                continue;
+            }
+            if response.get("id").and_then(Value::as_u64) != Some(unsubscribe_id)
+                || response.get("type").and_then(Value::as_str) != Some("result")
+            {
+                return Err(Error::InvalidResponse);
+            }
+            match response.get("success").and_then(Value::as_bool) {
+                Some(true) => break,
+                Some(false) => return Err(Error::RequestRejected),
+                None => return Err(Error::InvalidResponse),
+            }
+        }
+        Ok(routers.into_values().collect())
+    }
+
+    async fn matter_devices(
+        &self,
+        socket: &mut HomeAssistantSocket,
+    ) -> Result<(Vec<MatterDevice>, usize), Error> {
+        let raw_devices = self
+            .websocket_command(
+                socket,
+                1,
+                json!({"id":1,"type":"config/device_registry/list"}),
+            )
+            .await?;
+        let raw_areas = self
+            .websocket_command(
+                socket,
+                2,
+                json!({"id":2,"type":"config/area_registry/list"}),
+            )
+            .await?;
+        let mut areas = HashMap::new();
+        for area in raw_areas.as_array().ok_or(Error::InvalidResponse)? {
+            let Some(area_id) = area.get("area_id").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(name) = area.get("name").and_then(Value::as_str) else {
+                continue;
+            };
+            validate_registry_reference(area_id)?;
+            validate_bounded_text(name, MAX_REGISTRY_NAME_BYTES)?;
+            if areas.insert(area_id.to_owned(), name.to_owned()).is_some() {
+                return Err(Error::InvalidResponse);
+            }
+        }
+        let mut devices = Vec::new();
+        for value in raw_devices.as_array().ok_or(Error::InvalidResponse)? {
+            let is_matter = value
+                .get("identifiers")
+                .and_then(Value::as_array)
+                .is_some_and(|identifiers| {
+                    identifiers.iter().any(|identifier| {
+                        identifier
+                            .as_array()
+                            .and_then(|parts| parts.first())
+                            .and_then(Value::as_str)
+                            == Some("matter")
+                    })
+                });
+            if !is_matter {
+                continue;
+            }
+            let device_id = bounded_required_string(value.get("id"), MAX_REGISTRY_ID_BYTES)?;
+            let area_id = bounded_optional_string(value.get("area_id"), MAX_REGISTRY_ID_BYTES)?;
+            let name_by_user =
+                bounded_optional_string(value.get("name_by_user"), MAX_REGISTRY_NAME_BYTES)?;
+            let name = name_by_user.or(bounded_optional_string(
+                value.get("name"),
+                MAX_REGISTRY_NAME_BYTES,
+            )?);
+            let manufacturer =
+                bounded_optional_string(value.get("manufacturer"), MAX_REGISTRY_NAME_BYTES)?;
+            let model = bounded_optional_string(value.get("model"), MAX_REGISTRY_NAME_BYTES)?;
+            let area_name = area_id.as_ref().and_then(|id| areas.get(id).cloned());
+            devices.push(MatterDevice {
+                device_id,
+                name,
+                manufacturer,
+                model,
+                area_id,
+                area_name,
+            });
+        }
+        devices.sort_by(|left, right| left.device_id.cmp(&right.device_id));
+        if devices
+            .windows(2)
+            .any(|pair| pair[0].device_id == pair[1].device_id)
+        {
+            return Err(Error::InvalidResponse);
+        }
+        let total = devices.len();
+        if total > 10_000 {
+            return Err(Error::ResponseTooLarge);
+        }
+        Ok((devices, total))
     }
 
     fn admit(&self) -> Result<OwnedSemaphorePermit, Error> {
@@ -855,14 +1420,301 @@ impl HomeAssistantClient {
         let response = websocket_json(socket).await?;
         if response.get("id").and_then(Value::as_u64) != Some(id)
             || response.get("type").and_then(Value::as_str) != Some("result")
-            || response.get("success").and_then(Value::as_bool) != Some(true)
         {
             return Err(Error::InvalidResponse);
+        }
+        match response.get("success").and_then(Value::as_bool) {
+            Some(true) => {}
+            Some(false) => return Err(Error::RequestRejected),
+            None => return Err(Error::InvalidResponse),
         }
         response
             .get("result")
             .cloned()
             .ok_or(Error::InvalidResponse)
+    }
+}
+
+fn operation_span(kind: &'static str, action: &'static str) -> tracing::Span {
+    tracing::info_span!(
+        target: "smarthome_mcp::home_assistant",
+        "home_assistant.operation",
+        kind,
+        action,
+        outcome = tracing::field::Empty,
+    )
+}
+
+fn apply_router_event(
+    message: Value,
+    subscription_id: u64,
+    routers: &mut BTreeMap<String, ThreadRouter>,
+) -> Result<(), Error> {
+    if message.get("id").and_then(Value::as_u64) != Some(subscription_id)
+        || message.get("type").and_then(Value::as_str) != Some("event")
+    {
+        return Err(Error::InvalidResponse);
+    }
+    let event = message
+        .get("event")
+        .and_then(Value::as_object)
+        .ok_or(Error::InvalidResponse)?;
+    let key = bounded_required_string(event.get("key"), MAX_REGISTRY_ID_BYTES)?;
+    match event.get("type").and_then(Value::as_str) {
+        Some("router_discovered") => {
+            let data = event.get("data").ok_or(Error::InvalidResponse)?;
+            let router = normalize_router(key.clone(), data)?;
+            routers.insert(key, router);
+            if routers.len() > MAX_THREAD_ITEMS {
+                return Err(Error::ResponseTooLarge);
+            }
+        }
+        Some("router_removed") if event.get("data").is_none() => {
+            routers.remove(&key);
+        }
+        _ => return Err(Error::InvalidResponse),
+    }
+    Ok(())
+}
+
+fn finish_operation<T>(
+    span: &tracing::Span,
+    metrics: &mut MetricsGuard,
+    result: &Result<T, Error>,
+) {
+    let outcome = request_outcome(result);
+    span.record("outcome", outcome);
+    metrics.finish(outcome);
+}
+
+fn normalize_dataset(value: &Value) -> Result<ThreadDataset, Error> {
+    let object = value.as_object().ok_or(Error::InvalidResponse)?;
+    let channel = match object.get("channel") {
+        Some(Value::Null) => None,
+        Some(value) => Some(
+            value
+                .as_u64()
+                .and_then(|value| u16::try_from(value).ok())
+                .ok_or(Error::InvalidResponse)?,
+        ),
+        None => return Err(Error::InvalidResponse),
+    };
+    Ok(ThreadDataset {
+        channel,
+        created: bounded_required_string(object.get("created"), 64)?,
+        dataset_id: bounded_required_string(object.get("dataset_id"), MAX_REGISTRY_ID_BYTES)?,
+        extended_pan_id: bounded_required_string(object.get("extended_pan_id"), 64)?,
+        network_name: bounded_optional_present_string(
+            object.get("network_name"),
+            MAX_SHORT_TEXT_BYTES,
+        )?,
+        pan_id: bounded_optional_present_string(object.get("pan_id"), 64)?,
+        preferred: object
+            .get("preferred")
+            .and_then(Value::as_bool)
+            .ok_or(Error::InvalidResponse)?,
+        preferred_border_agent_id: bounded_optional_string(
+            object.get("preferred_border_agent_id"),
+            MAX_REGISTRY_ID_BYTES,
+        )?,
+        preferred_extended_address: bounded_optional_string(
+            object.get("preferred_extended_address"),
+            64,
+        )?,
+        source: bounded_required_string(object.get("source"), MAX_SHORT_TEXT_BYTES)?,
+    })
+}
+
+fn normalize_router(key: String, value: &Value) -> Result<ThreadRouter, Error> {
+    let object = value.as_object().ok_or(Error::InvalidResponse)?;
+    let addresses = object
+        .get("addresses")
+        .and_then(Value::as_array)
+        .ok_or(Error::InvalidResponse)?;
+    if addresses.len() > MAX_ROUTER_ADDRESSES {
+        return Err(Error::ResponseTooLarge);
+    }
+    let mut addresses = addresses
+        .iter()
+        .map(|value| {
+            let address = bounded_required_string(Some(value), 64)?;
+            validate_ip_address(&address)?;
+            Ok(address)
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    addresses.sort();
+    addresses.dedup();
+    Ok(ThreadRouter {
+        key,
+        instance_name: bounded_required_string(object.get("instance_name"), MAX_SHORT_TEXT_BYTES)?,
+        addresses,
+        border_agent_id: bounded_optional_string(
+            object.get("border_agent_id"),
+            MAX_REGISTRY_ID_BYTES,
+        )?,
+        brand: bounded_optional_string(object.get("brand"), 64)?,
+        extended_address: bounded_required_string(object.get("extended_address"), 64)?,
+        extended_pan_id: bounded_required_string(object.get("extended_pan_id"), 64)?,
+        model_name: bounded_optional_string(object.get("model_name"), MAX_SHORT_TEXT_BYTES)?,
+        network_name: bounded_optional_string(object.get("network_name"), MAX_SHORT_TEXT_BYTES)?,
+        server: bounded_optional_string(object.get("server"), MAX_SHORT_TEXT_BYTES)?,
+        thread_version: bounded_optional_string(object.get("thread_version"), 64)?,
+        unconfigured: optional_bool(object.get("unconfigured"))?,
+        vendor_name: bounded_optional_string(object.get("vendor_name"), MAX_SHORT_TEXT_BYTES)?,
+    })
+}
+
+fn normalize_diagnostics(value: Value) -> Result<Value, Error> {
+    let object = value.as_object().ok_or(Error::InvalidResponse)?;
+    let network_type = enum_string(
+        object.get("network_type"),
+        &["thread", "wifi", "ethernet", "unknown"],
+    )?;
+    let node_type = enum_string(
+        object.get("node_type"),
+        &[
+            "end_device",
+            "sleepy_end_device",
+            "routing_end_device",
+            "bridge",
+            "unknown",
+        ],
+    )?;
+    let addresses = object
+        .get("ip_adresses")
+        .and_then(Value::as_array)
+        .ok_or(Error::InvalidResponse)?;
+    if addresses.len() > MAX_MATTER_IP_ADDRESSES {
+        return Err(Error::ResponseTooLarge);
+    }
+    let ip_addresses = addresses
+        .iter()
+        .map(|value| {
+            let address = bounded_required_string(Some(value), 64)?;
+            validate_ip_address(&address)?;
+            Ok(address)
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    let fabrics = object
+        .get("active_fabrics")
+        .and_then(Value::as_array)
+        .ok_or(Error::InvalidResponse)?;
+    if fabrics.len() > 16 {
+        return Err(Error::ResponseTooLarge);
+    }
+    let active_fabrics = fabrics.iter().map(|fabric| {
+        let fabric = fabric.as_object().ok_or(Error::InvalidResponse)?;
+        Ok(json!({
+            "fabric_id":required_u64(fabric.get("fabric_id"))?,
+            "vendor_id":required_u64(fabric.get("vendor_id"))?,
+            "fabric_index":required_u64(fabric.get("fabric_index"))?,
+            "fabric_label":bounded_optional_string(fabric.get("fabric_label"), MAX_SHORT_TEXT_BYTES)?,
+            "vendor_name":bounded_optional_string(fabric.get("vendor_name"), MAX_SHORT_TEXT_BYTES)?,
+        }))
+    }).collect::<Result<Vec<_>, Error>>()?;
+    Ok(json!({
+        "node_id":required_u64(object.get("node_id"))?,
+        "network_type":network_type,
+        "node_type":node_type,
+        "network_name":bounded_optional_string(object.get("network_name"), MAX_SHORT_TEXT_BYTES)?,
+        "ip_addresses":ip_addresses,
+        "mac_address":bounded_optional_string(object.get("mac_address"), 64)?,
+        "available":object.get("available").and_then(Value::as_bool).ok_or(Error::InvalidResponse)?,
+        "active_fabrics":active_fabrics,
+        "active_fabric_index":required_u64(object.get("active_fabric_index"))?,
+    }))
+}
+
+fn normalize_ping(value: Value) -> Result<Value, Error> {
+    let object = value.as_object().ok_or(Error::InvalidResponse)?;
+    if object.len() > MAX_MATTER_IP_ADDRESSES {
+        return Err(Error::ResponseTooLarge);
+    }
+    let mut results = object
+        .iter()
+        .map(|(address, reachable)| {
+            validate_ip_address(address)?;
+            let reachable = reachable.as_bool().ok_or(Error::InvalidResponse)?;
+            Ok(json!({"address":address,"reachable":reachable}))
+        })
+        .collect::<Result<Vec<_>, Error>>()?;
+    results.sort_by(|left, right| left["address"].as_str().cmp(&right["address"].as_str()));
+    Ok(json!({"addresses":results}))
+}
+
+fn validate_ip_address(value: &str) -> Result<(), Error> {
+    if value.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+    let (address, scope) = value.split_once('%').ok_or(Error::InvalidResponse)?;
+    address
+        .parse::<std::net::Ipv6Addr>()
+        .map_err(|_| Error::InvalidResponse)?;
+    if scope.is_empty()
+        || scope.len() > 32
+        || scope.contains('%')
+        || !scope
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+    {
+        return Err(Error::InvalidResponse);
+    }
+    Ok(())
+}
+
+fn bounded_required_string(value: Option<&Value>, max_bytes: usize) -> Result<String, Error> {
+    let value = value
+        .and_then(Value::as_str)
+        .ok_or(Error::InvalidResponse)?;
+    validate_bounded_text(value, max_bytes)?;
+    Ok(value.to_owned())
+}
+
+fn bounded_optional_string(
+    value: Option<&Value>,
+    max_bytes: usize,
+) -> Result<Option<String>, Error> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => bounded_required_string(Some(value), max_bytes).map(Some),
+    }
+}
+
+fn bounded_optional_present_string(
+    value: Option<&Value>,
+    max_bytes: usize,
+) -> Result<Option<String>, Error> {
+    value.ok_or(Error::InvalidResponse)?;
+    bounded_optional_string(value, max_bytes)
+}
+
+fn validate_bounded_text(value: &str, max_bytes: usize) -> Result<(), Error> {
+    if value.is_empty() || value.len() > max_bytes || value.chars().any(char::is_control) {
+        Err(Error::InvalidResponse)
+    } else {
+        Ok(())
+    }
+}
+
+fn optional_bool(value: Option<&Value>) -> Result<Option<bool>, Error> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(value) => value.as_bool().map(Some).ok_or(Error::InvalidResponse),
+    }
+}
+
+fn required_u64(value: Option<&Value>) -> Result<u64, Error> {
+    value.and_then(Value::as_u64).ok_or(Error::InvalidResponse)
+}
+
+fn enum_string(value: Option<&Value>, allowed: &[&str]) -> Result<String, Error> {
+    let value = value
+        .and_then(Value::as_str)
+        .ok_or(Error::InvalidResponse)?;
+    if allowed.contains(&value) {
+        Ok(value.to_owned())
+    } else {
+        Err(Error::InvalidResponse)
     }
 }
 
@@ -1065,6 +1917,9 @@ where
             }
             Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
             Some(Ok(_)) => return Err(Error::InvalidResponse),
+            Some(Err(WebSocketError::Capacity(CapacityError::MessageTooLong { .. }))) => {
+                return Err(Error::ResponseTooLarge);
+            }
             Some(Err(_)) => return Err(Error::UpstreamUnavailable),
             None => return Err(Error::UpstreamUnavailable),
         }
@@ -1123,6 +1978,8 @@ mod tests {
         device_registry: Value,
         area_registry: Value,
         registry_response_overrides: HashMap<&'static str, Value>,
+        websocket_events: HashMap<&'static str, Vec<Value>>,
+        websocket_events_before_response: HashMap<&'static str, Vec<Value>>,
         states: Value,
         state_override: Option<Value>,
         history: Value,
@@ -1154,6 +2011,8 @@ mod tests {
                 device_registry: json!([]),
                 area_registry: json!([]),
                 registry_response_overrides: HashMap::new(),
+                websocket_events: HashMap::new(),
+                websocket_events_before_response: HashMap::new(),
                 states,
                 state_override: None,
                 history,
@@ -1233,6 +2092,21 @@ mod tests {
 
         fn with_registry_response(mut self, command: &'static str, response: Value) -> Self {
             self.registry_response_overrides.insert(command, response);
+            self
+        }
+
+        fn with_websocket_events(mut self, command: &'static str, events: Vec<Value>) -> Self {
+            self.websocket_events.insert(command, events);
+            self
+        }
+
+        fn with_websocket_events_before_response(
+            mut self,
+            command: &'static str,
+            events: Vec<Value>,
+        ) -> Self {
+            self.websocket_events_before_response
+                .insert(command, events);
             self
         }
 
@@ -1630,19 +2504,7 @@ mod tests {
             ),
             base().with_registry_response(
                 "config/entity_registry/get_entries",
-                json!({"id":2,"type":"result","success":false,"result":{}}),
-            ),
-            base().with_registry_response(
-                "config/entity_registry/get_entries",
                 json!({"id":2,"type":"result","success":true}),
-            ),
-            base().with_registry_response(
-                "config/device_registry/list",
-                json!({"id":3,"type":"result","success":false,"result":[]}),
-            ),
-            base().with_registry_response(
-                "config/area_registry/list",
-                json!({"id":4,"type":"result","success":false,"result":[]}),
             ),
         ];
 
@@ -2993,6 +3855,440 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn thread_networks_use_fixed_command_and_never_expose_unknown_fields() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([])).with_registry_response(
+            THREAD_LIST_DATASETS,
+            ws_result(
+                1,
+                json!({"datasets":[{
+                    "channel":15,"created":"2026-08-10T00:00:00Z","dataset_id":"dataset-a",
+                    "extended_pan_id":"aabbccdd","network_name":"Home Thread","pan_id":"1234",
+                    "preferred":true,"preferred_border_agent_id":null,
+                    "preferred_extended_address":"00112233","source":"integration",
+                    "tlv":"must-not-leak","wifi_password":"must-not-leak"
+                }]}),
+            ),
+        );
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        let output = client.list_thread_networks().await.unwrap();
+        let serialized = serde_json::to_string(&output).unwrap();
+        assert_eq!(output["networks"][0]["dataset_id"], "dataset-a");
+        assert!(!serialized.contains("must-not-leak"));
+        assert_eq!(
+            mock.commands.lock().unwrap().as_slice(),
+            &[json!({"id":1,"type":"thread/list_datasets"})]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn router_discovery_deduplicates_removes_and_unsubscribes() {
+        let router = json!({
+            "instance_name":"router.local.","addresses":["192.0.2.10"],
+            "border_agent_id":"agent-a","brand":"homeassistant",
+            "extended_address":"00112233","extended_pan_id":"aabbccdd",
+            "model_name":"Router","network_name":"Home Thread","server":"router.local.",
+            "thread_version":"1.3","unconfigured":false,"vendor_name":"Home Assistant",
+            "secret":"must-not-leak"
+        });
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_registry_response(THREAD_DISCOVER_ROUTERS, ws_result(1, Value::Null))
+            .with_websocket_events(THREAD_DISCOVER_ROUTERS, vec![
+                json!({"id":1,"type":"event","event":{"type":"router_discovered","key":"one","data":router}}),
+                json!({"id":1,"type":"event","event":{"type":"router_discovered","key":"one","data":{
+                    "instance_name":"updated.local.","addresses":["192.0.2.11"],
+                    "border_agent_id":null,"brand":null,"extended_address":"00112244",
+                    "extended_pan_id":"aabbccdd","model_name":null,"network_name":"Home Thread",
+                    "server":null,"thread_version":null,"unconfigured":null,"vendor_name":null
+                }}}),
+                json!({"id":1,"type":"event","event":{"type":"router_discovered","key":"two","data":{
+                    "instance_name":"removed.local.","addresses":[],"border_agent_id":null,"brand":null,
+                    "extended_address":"00112255","extended_pan_id":"eeff","model_name":null,
+                    "network_name":null,"server":null,"thread_version":null,"unconfigured":null,"vendor_name":null
+                }}}),
+                json!({"id":1,"type":"event","event":{"type":"router_removed","key":"two"}}),
+            ]);
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(3),
+        );
+        let output = client
+            .discover_thread_routers(&RouterDiscoveryQuery {
+                duration_seconds: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(output["routers"].as_array().unwrap().len(), 1);
+        assert_eq!(output["routers"][0]["instance_name"], "updated.local.");
+        assert!(
+            !serde_json::to_string(&output)
+                .unwrap()
+                .contains("must-not-leak")
+        );
+        assert_eq!(
+            mock.commands.lock().unwrap().last().unwrap(),
+            &json!({"id":2,"type":"unsubscribe_events","subscription":1})
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn router_discovery_accepts_a_queued_event_before_unsubscribe_ack() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_registry_response(THREAD_DISCOVER_ROUTERS, ws_result(1, Value::Null))
+            .with_websocket_events_before_response(
+                "unsubscribe_events",
+                vec![json!({"id":1,"type":"event","event":{
+                    "type":"router_discovered","key":"queued","data":{
+                        "instance_name":"queued.local.","addresses":["fe80::1%eth0"],
+                        "border_agent_id":null,"brand":null,"extended_address":"00112233",
+                        "extended_pan_id":"aabbccdd","model_name":null,
+                        "network_name":"Home Thread","server":null,"thread_version":null,
+                        "unconfigured":null,"vendor_name":null
+                    }
+                }})],
+            );
+        let (origin, server) = serve(mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(3),
+        );
+        let output = client
+            .discover_thread_routers(&RouterDiscoveryQuery {
+                duration_seconds: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(output["routers"][0]["key"], "queued");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn valid_home_assistant_rejection_is_not_a_protocol_error() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([])).with_registry_response(
+            THREAD_LIST_DATASETS,
+            json!({"id":1,"type":"result","success":false,"error":{
+                "code":"unknown_dataset","message":"must-not-leak"
+            }}),
+        );
+        let (origin, server) = serve(mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            client.list_thread_networks().await,
+            Err(Error::RequestRejected)
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn matter_registry_and_device_operations_are_strictly_projected() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_registry_response("config/device_registry/list", ws_result(1, json!([
+                {"id":"matter-b","identifiers":[["matter","device_b"]],"name":"B","name_by_user":"Preferred B","manufacturer":"Maker","model":"Model","area_id":"office","secret":"must-not-leak"},
+                {"id":"other","identifiers":[["other","device"]],"name":"Private"},
+                {"id":"matter-a","identifiers":[["matter","device_a"]],"name":"A","area_id":null}
+            ])))
+            .with_registry_response("config/area_registry/list", ws_result(2, json!([
+                {"area_id":"office","name":"Office","secret":"must-not-leak"}
+            ])));
+        let (origin, server) = serve(mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        let output = client
+            .list_matter_devices(&MatterDevicesQuery { limit: 1 })
+            .await
+            .unwrap();
+        assert_eq!(output["devices"][0]["device_id"], "matter-a");
+        assert_eq!(output["total"], 2);
+        assert_eq!(output["truncated"], true);
+        assert!(
+            !serde_json::to_string(&output)
+                .unwrap()
+                .contains("must-not-leak")
+        );
+        server.abort();
+
+        let diagnostics = normalize_diagnostics(json!({
+            "node_id":7,"network_type":"thread","node_type":"routing_end_device",
+            "network_name":"Home Thread","ip_adresses":["fe80::1%eth0"],"mac_address":"00:11:22:33:44:55",
+            "available":true,"active_fabrics":[{"fabric_id":1,"vendor_id":2,"fabric_index":3,
+                "fabric_label":"Home","vendor_name":"Vendor","secret":"must-not-leak"}],
+            "active_fabric_index":3,"credentials":"must-not-leak"
+        })).unwrap();
+        let serialized = serde_json::to_string(&diagnostics).unwrap();
+        assert_eq!(diagnostics["ip_addresses"][0], "fe80::1%eth0");
+        assert!(!serialized.contains("must-not-leak"));
+        assert_eq!(
+            normalize_ping(json!({"192.0.2.1":true,"secret":false})),
+            Err(Error::InvalidResponse)
+        );
+        assert_eq!(
+            normalize_ping(json!({"fe80::1%eth0":true})).unwrap()["addresses"][0],
+            json!({"address":"fe80::1%eth0","reachable":true})
+        );
+        assert_eq!(normalize_ping(json!("pong")), Err(Error::InvalidResponse));
+    }
+
+    #[tokio::test]
+    async fn execution_acknowledgments_discard_upstream_results() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_registries(
+                json!({}),
+                json!([{"id":"matter-a","identifiers":[["matter","node-a"]]}]),
+                json!([]),
+            )
+            .with_registry_response(
+                MATTER_INTERVIEW_NODE,
+                ws_result(2, json!({"credentials":"must-not-leak"})),
+            );
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        let output = client
+            .interview_matter_device(&MatterDeviceQuery {
+                device_id: "matter-a".to_owned(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            output,
+            json!({"action":"device.interview","device_id":"matter-a","success":true})
+        );
+        assert_eq!(
+            mock.commands.lock().unwrap().as_slice(),
+            &[
+                json!({"id":1,"type":"config/device_registry/list"}),
+                json!({"id":2,"type":"matter/interview_node","device_id":"matter-a"}),
+            ]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn matter_node_actions_fail_closed_for_non_matter_devices() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([])).with_registries(
+            json!({}),
+            json!([{"id":"not-matter","identifiers":[["other","node-a"]]}]),
+            json!([]),
+        );
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            client
+                .interview_matter_device(&MatterDeviceQuery {
+                    device_id: "not-matter".to_owned(),
+                })
+                .await,
+            Err(Error::NotMatterDevice)
+        );
+        assert_eq!(
+            mock.commands.lock().unwrap().as_slice(),
+            &[json!({"id":1,"type":"config/device_registry/list"})]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn matter_node_actions_reject_duplicate_registry_targets() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([])).with_registries(
+            json!({}),
+            json!([
+                {"id":"matter-a","identifiers":[["matter","node-a"]]},
+                {"id":"matter-a","identifiers":[["matter","node-b"]]}
+            ]),
+            json!([]),
+        );
+        let (origin, server) = serve(mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            client
+                .interview_matter_device(&MatterDeviceQuery {
+                    device_id: "matter-a".to_owned(),
+                })
+                .await,
+            Err(Error::InvalidResponse)
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn thread_readiness_reports_only_observed_status_and_issues() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_registry_response(
+                THREAD_LIST_DATASETS,
+                ws_result(
+                    1,
+                    json!({"datasets":[{
+                        "channel":15,"created":"2026-08-10T00:00:00Z","dataset_id":"dataset-a",
+                        "extended_pan_id":"aabbccdd","network_name":"Home Thread","pan_id":"1234",
+                        "preferred":true,"preferred_border_agent_id":null,
+                        "preferred_extended_address":null,"source":"integration"
+                    }]}),
+                ),
+            )
+            .with_registry_response(THREAD_DISCOVER_ROUTERS, ws_result(2, Value::Null));
+        let (origin, server) = serve(mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(5),
+        );
+        let output = client.thread_readiness().await.unwrap();
+        assert_eq!(output["datasets_exist"], true);
+        assert_eq!(output["preferred_dataset_id"], "dataset-a");
+        assert_eq!(output["routers_discovered"], false);
+        assert_eq!(output["router_matches_preferred_network"], false);
+        assert_eq!(
+            output["issues"],
+            json!([
+                "no_routers_discovered",
+                "no_router_matches_preferred_network"
+            ])
+        );
+        let serialized = serde_json::to_string(&output).unwrap();
+        for unsupported_claim in ["matter_server", "bluetooth", "reachable"] {
+            assert!(!serialized.contains(unsupported_claim));
+        }
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn preferred_thread_commands_have_exact_payloads() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([]));
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        client
+            .set_preferred_thread_dataset(&PreferredDatasetCommand {
+                dataset_id: "dataset-a".to_owned(),
+            })
+            .await
+            .unwrap();
+        client
+            .set_preferred_thread_router(&PreferredRouterCommand {
+                dataset_id: "dataset-a".to_owned(),
+                border_agent_id: None,
+                extended_address: "00112233".to_owned(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            mock.commands.lock().unwrap().as_slice(),
+            &[
+                json!({"id":1,"type":"thread/set_preferred_dataset","dataset_id":"dataset-a"}),
+                json!({"id":1,"type":"thread/set_preferred_border_agent","dataset_id":"dataset-a","border_agent_id":null,"extended_address":"00112233"}),
+            ]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn matter_diagnostics_and_ping_use_fixed_payloads_and_bounded_outputs() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_registries(
+                json!({}),
+                json!([{"id":"matter-a","identifiers":[["matter","node-a"]]}]),
+                json!([]),
+            )
+            .with_registry_response(MATTER_NODE_DIAGNOSTICS, ws_result(2, json!({
+                "node_id":7,"network_type":"wifi","node_type":"end_device","network_name":"IoT",
+                "ip_adresses":["192.0.2.1"],"mac_address":null,"available":true,
+                "active_fabrics":[],"active_fabric_index":1,"secret":"must-not-leak"
+            })))
+            .with_registry_response(MATTER_PING_NODE, ws_result(2, json!({"192.0.2.1":true})));
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        let query = MatterDeviceQuery {
+            device_id: "matter-a".to_owned(),
+        };
+        let diagnostics = client.matter_device_diagnostics(&query).await.unwrap();
+        let ping = client.ping_matter_device(&query).await.unwrap();
+        assert_eq!(diagnostics["result"]["network_type"], "wifi");
+        assert_eq!(
+            ping["result"]["addresses"][0],
+            json!({"address":"192.0.2.1","reachable":true})
+        );
+        assert!(
+            !serde_json::to_string(&diagnostics)
+                .unwrap()
+                .contains("must-not-leak")
+        );
+        assert_eq!(
+            mock.commands.lock().unwrap().as_slice(),
+            &[
+                json!({"id":1,"type":"config/device_registry/list"}),
+                json!({"id":2,"type":"matter/node_diagnostics","device_id":"matter-a"}),
+                json!({"id":1,"type":"config/device_registry/list"}),
+                json!({"id":2,"type":"matter/ping_node","device_id":"matter-a"}),
+            ]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn matter_readiness_claims_only_registry_responsiveness() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_registry_response(
+                "config/device_registry/list",
+                ws_result(
+                    1,
+                    json!([
+                        {"id":"matter-a","identifiers":[["matter","device_a"]],"name":"A"}
+                    ]),
+                ),
+            )
+            .with_registry_response("config/area_registry/list", ws_result(2, json!([])));
+        let (origin, server) = serve(mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        let output = client.matter_readiness().await.unwrap();
+        assert_eq!(
+            output,
+            json!({
+                "action":"readiness.get","device_registry_responsive":true,
+                "matter_device_count":1,"issues":[]
+            })
+        );
+        server.abort();
+    }
+
     fn raw_state(entity_id: &str, state: &str, friendly_name: &str) -> Value {
         json!({
             "entity_id": entity_id,
@@ -3123,12 +4419,34 @@ mod tests {
                     _ => ws_result(id, Value::Null),
                 },
             };
+            if let Some(events) = mock.websocket_events_before_response.get(command_type) {
+                for event in events {
+                    if socket
+                        .send(ws::Message::Text(event.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
             if socket
                 .send(ws::Message::Text(response.to_string().into()))
                 .await
                 .is_err()
             {
                 break;
+            }
+            if let Some(events) = mock.websocket_events.get(command_type) {
+                for event in events {
+                    if socket
+                        .send(ws::Message::Text(event.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
             }
         }
     }

@@ -7,6 +7,7 @@ pub enum Error {
     Timeout,
     Unauthorized,
     NotAllowed,
+    NotMatterDevice,
     NotFound,
     RequestRejected,
     UpstreamUnavailable,
@@ -40,6 +41,11 @@ impl Error {
             Self::NotAllowed => (
                 "not_allowed",
                 "One or more entities are not explicitly exposed to Assist.".to_owned(),
+                false,
+            ),
+            Self::NotMatterDevice => (
+                "not_matter_device",
+                "The requested device is not a Matter device.".to_owned(),
                 false,
             ),
             Self::NotFound => (

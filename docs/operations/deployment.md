@@ -74,11 +74,11 @@ The Pulumi step requires `pulumi-credentials`, `authentik-credentials`, and `tek
 
 The runtime serves stateless MCP Streamable HTTP revision `2026-07-28` at exact resource `/mcp`. It supports DCR, hardened CIMD, and native loopback clients through PostgreSQL-backed OAuth state.
 
-The runtime contract has two progressive tools. The unchanged read-only `home_assistant_query` exposes `entity.list`, `device.list`, `state.get`, `history.get`, and `camera.snapshot`. `home_assistant_exec` exposes only the fixed common controls. Each action performs a fresh Assist exposure lookup over Home Assistant WebSocket and requires explicit `conversation: true` for the exact target before a fixed upstream read or service POST. See the [Home Assistant specifications](../home-assistant/README.md).
+The runtime contract has six progressive tools. `home_assistant_query` exposes bounded entity, device, state, history, and camera reads; `home_assistant_exec` exposes only fixed common controls. `thread_query`, `thread_exec`, `matter_query`, and `matter_exec` expose the bounded catalogs in the [Thread and Matter contract](../home-assistant/spec/thread-matter.md). Entity actions perform a fresh Assist exposure lookup and require explicit `conversation: true`; system-level Thread and Matter actions instead use fixed Home Assistant commands and fresh Matter registry authorization where a Matter device is targeted. See the [Home Assistant specifications](../home-assistant/README.md).
 
-Arbitrary service calls, native Home Assistant MCP bridging, and arbitrary HTTP access are not runtime capabilities. The existing endpoint-wide `mcp:use` scope authorizes both tools; no per-tool scope or extra confirmation protects `lock.unlock` or `cover.open`.
+Arbitrary service calls, native Home Assistant MCP bridging, and arbitrary HTTP or WebSocket access are not runtime capabilities. The existing endpoint-wide `mcp:use` scope authorizes all six tools; no per-tool scope separates common controls from Thread selection or Matter interview authority.
 
-Camera snapshot and common-control support require no additional infrastructure resource, deployment manifest, runtime configuration, OAuth configuration, or per-tool grant. The recorded preview evidence above predates live authenticated validation of these contracts.
+Camera, common-control, Thread, and Matter support require no additional declared infrastructure resource, deployment manifest, runtime configuration, OAuth configuration, or per-tool grant. The Home Assistant token must be administrator-capable for the Thread commands and Matter interview. The recorded preview evidence above predates live authenticated validation of these contracts.
 
 ## Availability and Data
 

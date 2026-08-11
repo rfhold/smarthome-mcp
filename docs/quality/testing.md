@@ -65,7 +65,7 @@ Tests must cover the [Home Assistant specifications](../home-assistant/README.md
 - fixed action-to-service POST mapping and bounded constructed JSON, with no caller-selected service, domain, path, method, headers, origin, or arbitrary data;
 - bounded upstream result consumption and minimal output without upstream wrappers, state, context, or service-response data;
 - rejection of batching, toggle, confirmations, presets, sources, modes, colors, templates, and unapproved actions;
-- endpoint-wide `mcp:use` authority for both tools, including existing valid tokens and no extra confirmation for `lock.unlock` or `cover.open`;
+- endpoint-wide `mcp:use` authority for all six tools, including Thread selection and Matter interview without a separate per-tool grant;
 - redirect denial, body/frame/URL/time/concurrency bounds, cancellation, and permit release; and
 - stable source-free error codes without URLs, credentials, bodies, entity IDs, or state data.
 
@@ -85,9 +85,9 @@ Before preview acceptance, record separate evidence for:
 | --- | --- |
 | PostgreSQL | Embedded migrations, expiry, one-shot state, replay prevention, refresh rotation, and encrypted signing-key persistence against a disposable database. |
 | Authentik | Discovery, browser login, callback validation, and local token issuance. |
-| Kuri client | DCR, CIMD, loopback authorization, refresh, exact resource binding, `home_assistant_query`, and `home_assistant_exec`. |
-| Home Assistant | Controlled WebSocket exposure, REST state, history, and camera proxy reads, and fixed service calls for non-sensitive fixtures. |
+| Kuri client | DCR, CIMD, loopback authorization, refresh, exact resource binding, and discovery and invocation of all six progressive tools. |
+| Home Assistant | Controlled exposure, bounded REST reads, camera proxy reads, fixed service calls, Thread discovery and selection, and projected Matter registry and node operations for non-sensitive fixtures. |
 | Container | Multi-architecture build, UID, revision label, private-material inspection, and startup with controlled dependencies. |
-| Preview | Authorized browser login, authenticated `/mcp`, bounded HA reads and common controls, telemetry, probes, and secret non-disclosure. |
+| Preview | Authorized browser login, authenticated `/mcp`, bounded HA, Thread, and Matter operations, telemetry, probes, and secret non-disclosure. |
 
 Production additionally requires image and stack review, credential and wrapping-key rotation exercises, backup restoration, and recovery objectives. No external evidence is currently claimed.

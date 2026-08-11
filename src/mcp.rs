@@ -19,9 +19,10 @@ use crate::{
         Error as HomeAssistantError,
         actions::{
             CameraSnapshotInput, ClimateTemperatureInput, Control, ControlAction,
-            CoverPositionInput, EntityControlInput, FanPercentageInput, GetHistoryInput,
-            GetStatesInput, LightTurnOnInput, ListDevicesInput, ListEntitiesInput,
-            MediaPlayerVolumeInput,
+            CoverPositionInput, DiscoverRoutersInput, EntityControlInput, FanPercentageInput,
+            GetHistoryInput, GetStatesInput, LightTurnOnInput, ListDevicesInput, ListEntitiesInput,
+            ListMatterDevicesInput, MatterDeviceInput, MatterEmptyInput, MediaPlayerVolumeInput,
+            SetPreferredDatasetInput, SetPreferredRouterInput, ThreadEmptyInput,
         },
     },
     services::Services,
@@ -31,6 +32,14 @@ use crate::{
 const TOOL_NAME: &str = "home_assistant_query";
 #[cfg(test)]
 const EXEC_TOOL_NAME: &str = "home_assistant_exec";
+#[cfg(test)]
+const THREAD_QUERY_TOOL_NAME: &str = "thread_query";
+#[cfg(test)]
+const THREAD_EXEC_TOOL_NAME: &str = "thread_exec";
+#[cfg(test)]
+const MATTER_QUERY_TOOL_NAME: &str = "matter_query";
+#[cfg(test)]
+const MATTER_EXEC_TOOL_NAME: &str = "matter_exec";
 
 #[derive(Clone)]
 pub struct SmarthomeMcp {
@@ -96,6 +105,54 @@ pub fn router(
         namespace(climate, description = "Control Home Assistant climate entities."),
         namespace(media_player, description = "Control Home Assistant media players."),
         namespace(lock, description = "Control Home Assistant locks.")
+    ),
+    tool(
+        name = "thread_query",
+        description = "Inspect bounded Thread network and border-router status.",
+        annotations = json!({
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+        }),
+        namespace(network, description = "Inspect stored Thread networks."),
+        namespace(router, description = "Discover Thread border routers."),
+        namespace(readiness, description = "Inspect Thread readiness.")
+    ),
+    tool(
+        name = "thread_exec",
+        description = "Select preferred stored Thread networks and border routers.",
+        annotations = json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": true,
+            "openWorldHint": true
+        }),
+        namespace(network, description = "Select a preferred Thread network."),
+        namespace(router, description = "Select a preferred Thread border router.")
+    ),
+    tool(
+        name = "matter_query",
+        description = "Inspect bounded Matter device and readiness information.",
+        annotations = json!({
+            "readOnlyHint": true,
+            "destructiveHint": false,
+            "idempotentHint": true,
+            "openWorldHint": true
+        }),
+        namespace(readiness, description = "Inspect Matter integration readiness."),
+        namespace(device, description = "Inspect registered Matter devices.")
+    ),
+    tool(
+        name = "matter_exec",
+        description = "Run fixed bounded Matter device maintenance actions.",
+        annotations = json!({
+            "readOnlyHint": false,
+            "destructiveHint": true,
+            "idempotentHint": false,
+            "openWorldHint": true
+        }),
+        namespace(device, description = "Maintain registered Matter devices.")
     )
 )]
 impl SmarthomeMcp {
@@ -244,6 +301,239 @@ impl SmarthomeMcp {
         match result {
             Ok(output) => Ok(output),
             Err(error) => Ok(tool_error("get camera snapshot", error)),
+        }
+    }
+
+    /// List normalized stored Thread datasets without operational TLVs.
+    #[action(tool = "thread_query", name = "network.list")]
+    async fn list_thread_networks(
+        &self,
+        _: ThreadEmptyInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let result = tokio::select! {
+            result = self.services.home_assistant.list_thread_networks() => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => query_result(output),
+            Err(error) => Ok(tool_error("list Thread networks", error)),
+        }
+    }
+
+    /// Discover Thread border routers for one through ten seconds.
+    #[action(tool = "thread_query", name = "router.discover")]
+    async fn discover_thread_routers(
+        &self,
+        input: DiscoverRoutersInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(()) => {
+                return Ok(tool_error(
+                    "discover Thread routers",
+                    HomeAssistantError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.home_assistant.discover_thread_routers(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => query_result(output),
+            Err(error) => Ok(tool_error("discover Thread routers", error)),
+        }
+    }
+
+    /// Summarize stored Thread datasets and currently discovered routers.
+    #[action(tool = "thread_query", name = "readiness.get")]
+    async fn get_thread_readiness(
+        &self,
+        _: ThreadEmptyInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let result = tokio::select! {
+            result = self.services.home_assistant.thread_readiness() => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => query_result(output),
+            Err(error) => Ok(tool_error("get Thread readiness", error)),
+        }
+    }
+
+    /// Select one stored Thread dataset as preferred.
+    #[action(tool = "thread_exec", name = "network.set_preferred")]
+    async fn set_preferred_thread_network(
+        &self,
+        input: SetPreferredDatasetInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let command = match input.validate() {
+            Ok(command) => command,
+            Err(()) => {
+                return Ok(tool_error(
+                    "set preferred Thread network",
+                    HomeAssistantError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.home_assistant.set_preferred_thread_dataset(&command) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => Ok(control_result(output)),
+            Err(error) => Ok(tool_error("set preferred Thread network", error)),
+        }
+    }
+
+    /// Select one border router for a stored Thread dataset.
+    #[action(tool = "thread_exec", name = "router.set_preferred")]
+    async fn set_preferred_thread_router(
+        &self,
+        input: SetPreferredRouterInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let command = match input.validate() {
+            Ok(command) => command,
+            Err(()) => {
+                return Ok(tool_error(
+                    "set preferred Thread router",
+                    HomeAssistantError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.home_assistant.set_preferred_thread_router(&command) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => Ok(control_result(output)),
+            Err(error) => Ok(tool_error("set preferred Thread router", error)),
+        }
+    }
+
+    /// Report whether the Matter device registry API responds and its known device count.
+    #[action(tool = "matter_query", name = "readiness.get")]
+    async fn get_matter_readiness(
+        &self,
+        _: MatterEmptyInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let result = tokio::select! {
+            result = self.services.home_assistant.matter_readiness() => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => query_result(output),
+            Err(error) => Ok(tool_error("get Matter readiness", error)),
+        }
+    }
+
+    /// List devices identified by the Home Assistant registry as Matter devices.
+    #[action(tool = "matter_query", name = "device.list")]
+    async fn list_matter_devices(
+        &self,
+        input: ListMatterDevicesInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(()) => {
+                return Ok(tool_error(
+                    "list Matter devices",
+                    HomeAssistantError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.home_assistant.list_matter_devices(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => query_result(output),
+            Err(error) => Ok(tool_error("list Matter devices", error)),
+        }
+    }
+
+    /// Get a strict projection of official Matter node diagnostics.
+    #[action(tool = "matter_query", name = "device.diagnostics")]
+    async fn get_matter_device_diagnostics(
+        &self,
+        input: MatterDeviceInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(()) => {
+                return Ok(tool_error(
+                    "get Matter device diagnostics",
+                    HomeAssistantError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.home_assistant.matter_device_diagnostics(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => query_result(output),
+            Err(error) => Ok(tool_error("get Matter device diagnostics", error)),
+        }
+    }
+
+    /// Ping a Matter device's known IP addresses.
+    #[action(tool = "matter_query", name = "device.ping")]
+    async fn ping_matter_device(
+        &self,
+        input: MatterDeviceInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(()) => {
+                return Ok(tool_error(
+                    "ping Matter device",
+                    HomeAssistantError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.home_assistant.ping_matter_device(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => query_result(output),
+            Err(error) => Ok(tool_error("ping Matter device", error)),
+        }
+    }
+
+    /// Re-interview one registered Matter device and discard upstream details.
+    #[action(tool = "matter_exec", name = "device.interview")]
+    async fn interview_matter_device(
+        &self,
+        input: MatterDeviceInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(()) => {
+                return Ok(tool_error(
+                    "interview Matter device",
+                    HomeAssistantError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.home_assistant.interview_matter_device(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => Ok(control_result(output)),
+            Err(error) => Ok(tool_error("interview Matter device", error)),
         }
     }
 
@@ -801,7 +1091,7 @@ mod tests {
         let (endpoint, task) = endpoint().await;
         let (_, response) = post(&endpoint, request("tools/list", "list", json!({}))).await;
         let tools = response["result"]["tools"].as_array().unwrap();
-        assert_eq!(tools.len(), 2);
+        assert_eq!(tools.len(), 6);
         let query = tools.iter().find(|tool| tool["name"] == TOOL_NAME).unwrap();
         let exec = tools
             .iter()
@@ -817,6 +1107,126 @@ mod tests {
                 "openWorldHint":true
             })
         );
+        for name in [THREAD_QUERY_TOOL_NAME, MATTER_QUERY_TOOL_NAME] {
+            let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
+            assert_eq!(tool["annotations"]["readOnlyHint"], true);
+            assert_eq!(tool["annotations"]["destructiveHint"], false);
+        }
+        for name in [THREAD_EXEC_TOOL_NAME, MATTER_EXEC_TOOL_NAME] {
+            let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
+            assert_eq!(tool["annotations"]["readOnlyHint"], false);
+            assert_eq!(tool["annotations"]["destructiveHint"], true);
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn thread_and_matter_discovery_have_exact_first_slice_catalogs() {
+        let (endpoint, task) = endpoint().await;
+        let (_, response) = post(&endpoint, request("tools/list", "list", json!({}))).await;
+        let tools = response["result"]["tools"].as_array().unwrap();
+        for (name, actions, forbidden) in [
+            (
+                THREAD_QUERY_TOOL_NAME,
+                vec!["network.list", "router.discover", "readiness.get"],
+                vec!["get_dataset_tlv", "dataset.delete", "dataset.import"],
+            ),
+            (
+                THREAD_EXEC_TOOL_NAME,
+                vec!["network.set_preferred", "router.set_preferred"],
+                vec!["delete", "import", "tlv"],
+            ),
+            (
+                MATTER_QUERY_TOOL_NAME,
+                vec![
+                    "readiness.get",
+                    "device.list",
+                    "device.diagnostics",
+                    "device.ping",
+                ],
+                vec!["commission", "fabric", "window"],
+            ),
+            (
+                MATTER_EXEC_TOOL_NAME,
+                vec!["device.interview"],
+                vec!["commission", "fabric", "window", "remove"],
+            ),
+        ] {
+            let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
+            let schema = serde_json::to_string(&tool["inputSchema"]).unwrap();
+            for action in actions {
+                assert!(schema.contains(action), "{name} missing {action}");
+            }
+            for action in forbidden {
+                assert!(!schema.contains(action), "{name} exposed {action}");
+            }
+            assert!(schema.contains("\"additionalProperties\":false"));
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn thread_and_matter_help_and_semantic_errors_are_safe() {
+        let (endpoint, task) = endpoint().await;
+        for (tool, namespace_help, action) in [
+            (THREAD_QUERY_TOOL_NAME, "help.network", "network.list"),
+            (THREAD_QUERY_TOOL_NAME, "help.router", "router.discover"),
+            (THREAD_QUERY_TOOL_NAME, "help.readiness", "readiness.get"),
+            (
+                THREAD_EXEC_TOOL_NAME,
+                "help.network",
+                "network.set_preferred",
+            ),
+            (MATTER_QUERY_TOOL_NAME, "help.device", "device.list"),
+            (MATTER_EXEC_TOOL_NAME, "help.device", "device.interview"),
+        ] {
+            let (_, response) = post(
+                &endpoint,
+                request(
+                    "tools/call",
+                    namespace_help,
+                    json!({"name":tool,"arguments":{"action":namespace_help}}),
+                ),
+            )
+            .await;
+            let actions = response["result"]["structuredContent"]["actions"]
+                .as_array()
+                .unwrap();
+            assert!(actions.iter().any(|entry| entry["action"] == action));
+        }
+
+        for (tool, action, input) in [
+            (
+                THREAD_QUERY_TOOL_NAME,
+                "router.discover",
+                json!({"duration_seconds":0}),
+            ),
+            (
+                THREAD_EXEC_TOOL_NAME,
+                "network.set_preferred",
+                json!({"dataset_id":"bad/id"}),
+            ),
+            (
+                MATTER_QUERY_TOOL_NAME,
+                "device.ping",
+                json!({"device_id":"bad id"}),
+            ),
+        ] {
+            let (_, response) = post(
+                &endpoint,
+                request(
+                    "tools/call",
+                    action,
+                    json!({"name":tool,"arguments":{"action":action,"input":input}}),
+                ),
+            )
+            .await;
+            assert_eq!(
+                response["result"]["structuredContent"]["error"]["code"],
+                "invalid_arguments"
+            );
+            assert_eq!(response["result"]["isError"], true);
+        }
         task.abort();
     }
 

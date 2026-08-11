@@ -18,7 +18,7 @@ Each `/mcp` request stands alone after token validation. The service requires no
 
 Every MCP request must use a locally issued ES256 JWT access token. Each token must use JWT type `at+jwt` and contain scope `mcp:use`.
 
-The endpoint-wide `mcp:use` scope authorizes both `home_assistant_query` and `home_assistant_exec`. There is no per-tool scope, so every existing valid token with `mcp:use` gains common-control authority without a new grant, consent, client registration, or issuer change. In particular, `lock.unlock` and `cover.open` have no additional confirmation or authorization check beyond `mcp:use` and fresh exact Assist exposure. See the [common-control contract](../home-assistant/common-controls.md).
+The endpoint-wide `mcp:use` scope authorizes all six progressive tools: the Home Assistant query and execution tools plus the Thread and Matter query and execution tools. There is no per-tool scope, so every valid token with `mcp:use` receives all implemented capabilities without a separate grant, consent, client registration, or issuer change. Entity operations still require fresh exact Assist exposure, but system-level Thread selection and Matter interview operations cannot use that entity authorization check. See the [common-control contract](../home-assistant/common-controls.md) and [Thread and Matter contract](../home-assistant/spec/thread-matter.md).
 
 Authentik provides browser identity only. Authentik access tokens, ID tokens, and other Authentik credentials never authorize `/mcp`.
 
