@@ -19,6 +19,7 @@ use tokio_tungstenite::{
     },
 };
 use tracing::Instrument as _;
+use unicode_casefold::UnicodeCaseFold;
 use url::Url;
 
 use crate::{config::Secret, http_client};
@@ -26,10 +27,10 @@ use crate::{config::Secret, http_client};
 use super::{
     Error,
     actions::{
-        AutomationTracesQuery, AutomationValidation, CameraSnapshotQuery, ConfigUpsert, Control,
-        DevicesQuery, EntitiesQuery, HistoryQuery, MatterDeviceQuery, MatterDevicesQuery,
-        PreferredDatasetCommand, PreferredRouterCommand, RouterDiscoveryQuery, StatesQuery,
-        valid_entity_id,
+        AutomationTracesQuery, AutomationValidation, CameraSnapshotQuery, ConfigGetQuery,
+        ConfigListQuery, ConfigUpsert, Control, DevicesQuery, EntitiesQuery, HistoryQuery,
+        MatterDeviceQuery, MatterDevicesQuery, PreferredDatasetCommand, PreferredRouterCommand,
+        RouterDiscoveryQuery, StatesQuery, valid_config_key, valid_entity_id, validate_native_json,
     },
     telemetry::{MetricsGuard, request_outcome},
 };
@@ -81,6 +82,13 @@ struct RawState {
     attributes: Value,
     last_changed: String,
     last_updated: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawStoredConfigState {
+    entity_id: String,
+    #[serde(default)]
+    attributes: Value,
 }
 
 #[derive(Debug, Serialize)]
@@ -234,6 +242,13 @@ struct AutomationTrace {
     error_present: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     error_category: Option<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct StoredConfigEntry {
+    config_key: String,
+    entity_id: String,
+    name: String,
 }
 
 pub(crate) struct CameraSnapshot {
@@ -844,6 +859,23 @@ impl HomeAssistantClient {
             .await
     }
 
+    pub(crate) async fn list_scenes(&self, query: &ConfigListQuery) -> Result<Value, Error> {
+        self.list_configs("scene.list", "scene", query).await
+    }
+
+    pub(crate) async fn get_scene(&self, query: &ConfigGetQuery) -> Result<Value, Error> {
+        self.get_config("scene.get", "scene", query).await
+    }
+
+    pub(crate) async fn list_automations(&self, query: &ConfigListQuery) -> Result<Value, Error> {
+        self.list_configs("automation.list", "automation", query)
+            .await
+    }
+
+    pub(crate) async fn get_automation(&self, query: &ConfigGetQuery) -> Result<Value, Error> {
+        self.get_config("automation.get", "automation", query).await
+    }
+
     pub(crate) async fn validate_automation(
         &self,
         validation: &AutomationValidation,
@@ -924,6 +956,76 @@ impl HomeAssistantClient {
                 return Err(Error::InvalidResponse);
             }
             bounded_output(json!({"action":action,"config_key":command.config_key,"accepted":true}))
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
+    async fn list_configs(
+        &self,
+        action: &'static str,
+        domain: &'static str,
+        query: &ConfigListQuery,
+    ) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let mut metrics = MetricsGuard::new(action);
+        let span = operation_span("home_assistant.query", action);
+        let result = tokio::time::timeout(self.timeout, async {
+            let url = self.endpoint(&["api", "states"])?;
+            let states: Vec<RawStoredConfigState> = self.get_json(url).await?;
+            let mut entries = states
+                .into_iter()
+                .filter_map(|state| normalize_stored_config(state, domain).transpose())
+                .collect::<Result<Vec<_>, _>>()?;
+            entries.retain(|entry| {
+                query.query.as_ref().is_none_or(|needle| {
+                    case_fold(&entry.config_key).contains(needle)
+                        || case_fold(&entry.entity_id).contains(needle)
+                        || case_fold(&entry.name).contains(needle)
+                })
+            });
+            entries.sort_by(|left, right| {
+                case_fold(&left.name)
+                    .cmp(&case_fold(&right.name))
+                    .then_with(|| left.config_key.cmp(&right.config_key))
+                    .then_with(|| left.entity_id.cmp(&right.entity_id))
+            });
+            let total = entries.len();
+            let truncated = total > query.limit;
+            entries.truncate(query.limit);
+            bounded_output(json!({
+                "action":action,
+                "entries":entries,
+                "total":total,
+                "truncated":truncated,
+            }))
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
+    async fn get_config(
+        &self,
+        action: &'static str,
+        domain: &'static str,
+        query: &ConfigGetQuery,
+    ) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let mut metrics = MetricsGuard::new(action);
+        let span = operation_span("home_assistant.query", action);
+        let result = tokio::time::timeout(self.timeout, async {
+            let url = self.endpoint(&["api", "config", domain, "config", &query.config_key])?;
+            let config: Value = self.get_json(url).await.map_err(config_get_error)?;
+            if !config.is_object() || validate_native_json(&config).is_err() {
+                return Err(Error::InvalidResponse);
+            }
+            bounded_output(json!({"action":action,"config_key":query.config_key,"config":config}))
         })
         .instrument(span.clone())
         .await
@@ -2100,6 +2202,53 @@ fn normalize_state(state: RawState) -> Result<EntityState, Error> {
     })
 }
 
+fn normalize_stored_config(
+    state: RawStoredConfigState,
+    domain: &str,
+) -> Result<Option<StoredConfigEntry>, Error> {
+    let Some((state_domain, _)) = state.entity_id.split_once('.') else {
+        return Ok(None);
+    };
+    if state_domain != domain {
+        return Ok(None);
+    }
+    let Some(attributes) = state.attributes.as_object() else {
+        return Ok(None);
+    };
+    let Some(config_key) = attributes.get("id").and_then(Value::as_str) else {
+        return Ok(None);
+    };
+    if !valid_config_key(config_key) || !valid_entity_id(&state.entity_id) {
+        return Ok(None);
+    }
+    let name = match attributes.get("friendly_name") {
+        Some(Value::String(name))
+            if name.len() <= MAX_FRIENDLY_NAME_BYTES
+                && !name.is_empty()
+                && !name.chars().any(char::is_control) =>
+        {
+            name.clone()
+        }
+        _ => config_key.to_owned(),
+    };
+    Ok(Some(StoredConfigEntry {
+        config_key: config_key.to_owned(),
+        entity_id: state.entity_id,
+        name,
+    }))
+}
+
+fn case_fold(value: &str) -> String {
+    value.case_fold().collect()
+}
+
+fn config_get_error(error: Error) -> Error {
+    match error {
+        Error::NotFound => Error::ConfigNotFound,
+        error => error,
+    }
+}
+
 fn normalize_history_state(state: RawHistoryState) -> Result<HistoryState, Error> {
     if state.state.len() > MAX_STATE_BYTES
         || chrono::DateTime::parse_from_rfc3339(&state.last_changed).is_err()
@@ -2237,8 +2386,8 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt as _;
 
     use crate::integrations::home_assistant::actions::{
-        AutomationTracesQuery, AutomationValidation, ConfigUpsert, ControlAction,
-        EntityControlInput, LightTurnOnInput,
+        AutomationTracesQuery, AutomationValidation, ConfigGetQuery, ConfigListQuery, ConfigUpsert,
+        ControlAction, EntityControlInput, LightTurnOnInput,
     };
 
     use super::*;
@@ -4776,6 +4925,191 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn config_lists_filter_project_sort_and_limit_editor_managed_states() {
+        let mock = MockHomeAssistant::new(
+            json!({}),
+            json!([
+                {
+                    "entity_id":"automation.zulu","state":"on",
+                    "attributes":{"id":"zulu_key","friendly_name":"Zulu","secret":"must-not-leak"},
+                    "last_changed":"bad","last_updated":"bad"
+                },
+                {
+                    "entity_id":"automation.alpha","state":"off",
+                    "attributes":{"id":"alpha_key","friendly_name":"alpha","latitude":"must-not-leak"},
+                    "last_changed":"bad","last_updated":"bad"
+                },
+                {
+                    "entity_id":"automation.sigma","state":7,
+                    "attributes":{"id":"sigma_key","friendly_name":"ς"}
+                },
+                {
+                    "entity_id":"automation.fallback","state":null,
+                    "attributes":{"id":"fallback_key","friendly_name":"\n"}
+                },
+                {
+                    "entity_id":"automation.yaml_only","state":"on",
+                    "attributes":{"friendly_name":"YAML only","secret":"must-not-leak"},
+                    "last_changed":"bad","last_updated":"bad"
+                },
+                {
+                    "entity_id":"automation.unsafe","state":"on",
+                    "attributes":{"id":"bad/key","friendly_name":"Unsafe"},
+                    "last_changed":"bad","last_updated":"bad"
+                },
+                {
+                    "entity_id":"scene.evening","state":"scening",
+                    "attributes":{"id":"evening_scene","friendly_name":"Evening"},
+                    "last_changed":"bad","last_updated":"bad"
+                }
+            ]),
+            json!([]),
+        );
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+
+        let output = client
+            .list_automations(&ConfigListQuery {
+                query: None,
+                limit: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            output["entries"],
+            json!([{
+                "config_key":"alpha_key","entity_id":"automation.alpha","name":"alpha"
+            }])
+        );
+        assert_eq!(output["total"], 4);
+        assert_eq!(output["truncated"], true);
+        let serialized = serde_json::to_string(&output).unwrap();
+        for forbidden in [
+            "must-not-leak",
+            "attributes",
+            "yaml_only",
+            "bad/key",
+            "evening_scene",
+        ] {
+            assert!(!serialized.contains(forbidden));
+        }
+
+        let searched = client
+            .list_automations(&ConfigListQuery {
+                query: Some("ZULU_KEY".to_lowercase()),
+                limit: 100,
+            })
+            .await
+            .unwrap();
+        assert_eq!(searched["entries"][0]["entity_id"], "automation.zulu");
+
+        let folded = client
+            .list_automations(&ConfigListQuery {
+                query: Some(case_fold("σ")),
+                limit: 100,
+            })
+            .await
+            .unwrap();
+        assert_eq!(folded["entries"][0]["entity_id"], "automation.sigma");
+        let fallback = client
+            .list_automations(&ConfigListQuery {
+                query: Some("fallback_key".to_owned()),
+                limit: 100,
+            })
+            .await
+            .unwrap();
+        assert_eq!(fallback["entries"][0]["name"], "fallback_key");
+        assert_eq!(mock.websocket_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(mock.state_calls.load(Ordering::Relaxed), 4);
+        server.abort();
+    }
+
+    #[test]
+    fn config_gets_map_not_found_without_changing_other_errors() {
+        assert_eq!(config_get_error(Error::NotFound), Error::ConfigNotFound);
+        assert_eq!(config_get_error(Error::Timeout), Error::Timeout);
+    }
+
+    #[tokio::test]
+    async fn config_gets_use_exact_routes_and_enforce_native_bounds() {
+        let native = json!({
+            "id":"arrival_lights","alias":"Arrival",
+            "triggers":[{"trigger":"state","entity_id":"person.private"}],
+            "actions":[{"action":"notify.send","data":{"secret":"authorized-output"}}]
+        });
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_config_response(native.clone());
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        let output = client
+            .get_automation(&ConfigGetQuery {
+                config_key: "arrival_lights".to_owned(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(output["config"], native);
+        assert_eq!(mock.websocket_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            mock.requests.lock().unwrap().as_slice(),
+            [
+                "http-auth:Bearer test-token",
+                "config-get:/api/config/automation/config/arrival_lights",
+            ]
+        );
+        server.abort();
+
+        for invalid in [json!([]), json!({"payload":"x".repeat(256 * 1024)})] {
+            let mock = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+                .with_config_response(invalid);
+            let (origin, server) = serve(mock).await;
+            let client = HomeAssistantClient::for_test(
+                origin,
+                Secret("test-token".to_owned()),
+                Duration::from_secs(2),
+            );
+            assert_eq!(
+                client
+                    .get_scene(&ConfigGetQuery {
+                        config_key: "safe_key".to_owned()
+                    })
+                    .await,
+                Err(Error::InvalidResponse)
+            );
+            server.abort();
+        }
+
+        let mut deep = json!(true);
+        for _ in 0..=32 {
+            deep = json!([deep]);
+        }
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_config_response(json!({"deep":deep}));
+        let (origin, server) = serve(mock).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            client
+                .get_scene(&ConfigGetQuery {
+                    config_key: "safe_key".to_owned()
+                })
+                .await,
+            Err(Error::InvalidResponse)
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
     async fn authoring_timeouts_release_permits_and_oversized_responses_fail_safely() {
         let command = ConfigUpsert {
             config_key: "private_key".to_owned(),
@@ -4790,6 +5124,29 @@ mod tests {
             Duration::from_millis(50),
         );
         assert_eq!(client.upsert_scene(&command).await, Err(Error::Timeout));
+        let permits = (0..MAX_CONCURRENT_QUERIES)
+            .map(|_| client.admit().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(permits.len(), MAX_CONCURRENT_QUERIES);
+        drop(permits);
+        server.abort();
+
+        let delayed = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_config_delay(Duration::from_secs(1));
+        let (origin, server) = serve(delayed).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_millis(50),
+        );
+        assert_eq!(
+            client
+                .get_scene(&ConfigGetQuery {
+                    config_key: "private_key".to_owned()
+                })
+                .await,
+            Err(Error::Timeout)
+        );
         let permits = (0..MAX_CONCURRENT_QUERIES)
             .map(|_| client.admit().unwrap())
             .collect::<Vec<_>>();
@@ -5029,7 +5386,7 @@ mod tests {
             .route("/api/services/{domain}/{service}", post(service_call))
             .route(
                 "/api/config/{domain}/config/{config_key}",
-                post(config_upsert),
+                get(config_get).post(config_upsert),
             )
             .with_state(mock);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -5279,6 +5636,26 @@ mod tests {
             requests.push(format!("config:{uri}"));
             requests.push(format!("config-body:{}", String::from_utf8_lossy(&body)));
         }
+        if let Some(delay) = mock.config_delay {
+            tokio::time::sleep(delay).await;
+        }
+        Json(mock.config_response).into_response()
+    }
+
+    async fn config_get(
+        State(mock): State<MockHomeAssistant>,
+        Path((domain, config_key)): Path<(String, String)>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+    ) -> Response {
+        record_http_auth(&mock, &headers);
+        if !matches!(domain.as_str(), "scene" | "automation") || config_key.is_empty() {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        mock.requests
+            .lock()
+            .unwrap()
+            .push(format!("config-get:{uri}"));
         if let Some(delay) = mock.config_delay {
             tokio::time::sleep(delay).await;
         }

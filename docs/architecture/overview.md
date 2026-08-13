@@ -20,11 +20,11 @@
 3. The integration acquires one of four non-waiting operation permits.
 4. It opens a bounded authenticated Home Assistant connection for the selected fixed operation.
 5. Entity operations refresh Assist exposure and permit only entities marked `conversation: true`.
-6. Scene and automation authoring and evidence actions use the [administrator-token exception](../home-assistant/spec/authoring-evidence.md).
+6. Scene and automation authoring, config-read, and evidence actions use the [administrator-token exception](../home-assistant/spec/authoring-evidence.md).
 7. Matter device actions refresh the device registry and require an exact Matter device match.
 8. Thread and Matter actions use only their fixed [WebSocket command catalog](../home-assistant/spec/thread-matter.md).
 9. Queries return projected bounded data. Execution actions discard upstream details and return minimal output.
 
-The caller cannot select an upstream origin, credential, header, generic command, Home Assistant service, or HTTP method. A validated config key selects only the final segment of one fixed scene or automation config path. Native JSON is accepted only by the four fixed [authoring and evidence actions](../home-assistant/spec/authoring-evidence.md). Controls outside the fixed [common-control catalog](../home-assistant/common-controls.md), authoring and evidence contract, and Thread and Matter contract remain excluded.
+The caller cannot select an upstream origin, credential, header, generic command, Home Assistant service, or HTTP method. A validated config key selects only the final segment of one fixed scene or automation config path. Native JSON is accepted or returned only by the applicable eight fixed [authoring and evidence actions](../home-assistant/spec/authoring-evidence.md). Controls outside the fixed [common-control catalog](../home-assistant/common-controls.md), authoring and evidence contract, and Thread and Matter contract remain excluded.
 
 `GET /health` reports process health. `GET /ready` performs bounded PostgreSQL and signing-key readiness checks; it does not contact Home Assistant or Authentik.

@@ -28,7 +28,7 @@ Tests cover:
 - deployment environment and downward API wiring; and
 - declared Alloy and Pyroscope egress ports.
 
-Required authoring and evidence coverage must prove fixed action labels. It must also prove that config keys, item IDs, native config, trace fields, and raw errors remain absent.
+Required authoring and evidence coverage must prove fixed action labels. It must also prove that config keys, entity IDs, names, item IDs, native config, trace fields, and raw errors remain absent.
 
 ## Post-Deployment Evidence
 

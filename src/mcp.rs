@@ -19,11 +19,12 @@ use crate::{
         Error as HomeAssistantError,
         actions::{
             AutomationTracesInput, AutomationValidateInput, CameraSnapshotInput,
-            ClimateTemperatureInput, ConfigUpsertInput, Control, ControlAction, CoverPositionInput,
-            DiscoverRoutersInput, EntityControlInput, FanPercentageInput, GetHistoryInput,
-            GetStatesInput, LightTurnOnInput, ListDevicesInput, ListEntitiesInput,
-            ListMatterDevicesInput, MatterDeviceInput, MatterEmptyInput, MediaPlayerVolumeInput,
-            SetPreferredDatasetInput, SetPreferredRouterInput, ThreadEmptyInput,
+            ClimateTemperatureInput, ConfigGetInput, ConfigListInput, ConfigUpsertInput, Control,
+            ControlAction, CoverPositionInput, DiscoverRoutersInput, EntityControlInput,
+            FanPercentageInput, GetHistoryInput, GetStatesInput, LightTurnOnInput,
+            ListDevicesInput, ListEntitiesInput, ListMatterDevicesInput, MatterDeviceInput,
+            MatterEmptyInput, MediaPlayerVolumeInput, SetPreferredDatasetInput,
+            SetPreferredRouterInput, ThreadEmptyInput,
         },
     },
     services::Services,
@@ -76,7 +77,7 @@ pub fn router(
     description = "Authenticated, policy-bounded smart-home tools.",
     tool(
         name = "home_assistant_query",
-        description = "Read bounded Home Assistant entity data, validate automation sections, and summarize automation traces.",
+        description = "Read bounded Home Assistant entity and editor-managed config data, validate automation sections, and summarize automation traces.",
         annotations = json!({
             "readOnlyHint": true,
             "destructiveHint": false,
@@ -88,7 +89,8 @@ pub fn router(
         namespace(state, description = "Query Home Assistant current states."),
         namespace(history, description = "Query Home Assistant state history."),
         namespace(camera, description = "Read Home Assistant camera frames."),
-        namespace(automation, description = "Validate automation sections and summarize traces.")
+        namespace(automation, description = "Read stored automations, validate sections, and summarize traces."),
+        namespace(scene, description = "Read stored Home Assistant scenes.")
     ),
     tool(
         name = "home_assistant_exec",
@@ -159,6 +161,112 @@ pub fn router(
     )
 )]
 impl SmarthomeMcp {
+    /// List editor-managed scenes using bounded state metadata. YAML-only scenes
+    /// without a safe stored config ID are not included.
+    #[action(tool = "home_assistant_query", name = "scene.list")]
+    async fn list_scenes(
+        &self,
+        input: ConfigListInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(()) => {
+                return Ok(tool_error(
+                    "list scenes",
+                    HomeAssistantError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.home_assistant.list_scenes(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => query_result(output),
+            Err(error) => Ok(tool_error("list scenes", error)),
+        }
+    }
+
+    /// Get one complete native editor-managed scene configuration by stable key.
+    #[action(tool = "home_assistant_query", name = "scene.get")]
+    async fn get_scene(
+        &self,
+        input: ConfigGetInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(()) => {
+                return Ok(tool_error(
+                    "get scene",
+                    HomeAssistantError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.home_assistant.get_scene(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => query_result(output),
+            Err(error) => Ok(tool_error("get scene", error)),
+        }
+    }
+
+    /// List editor-managed automations using bounded state metadata. YAML-only
+    /// automations without a safe stored config ID are not included.
+    #[action(tool = "home_assistant_query", name = "automation.list")]
+    async fn list_automations(
+        &self,
+        input: ConfigListInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(()) => {
+                return Ok(tool_error(
+                    "list automations",
+                    HomeAssistantError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.home_assistant.list_automations(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => query_result(output),
+            Err(error) => Ok(tool_error("list automations", error)),
+        }
+    }
+
+    /// Get one complete native editor-managed automation configuration by stable key.
+    #[action(tool = "home_assistant_query", name = "automation.get")]
+    async fn get_automation(
+        &self,
+        input: ConfigGetInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(()) => {
+                return Ok(tool_error(
+                    "get automation",
+                    HomeAssistantError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.home_assistant.get_automation(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => query_result(output),
+            Err(error) => Ok(tool_error("get automation", error)),
+        }
+    }
+
     /// Upsert a complete native scene configuration under a stable key. Home
     /// Assistant accepts the change for asynchronous reload; activation is not implied.
     #[action(tool = "home_assistant_exec", name = "scene.upsert")]
@@ -1177,11 +1285,13 @@ mod tests {
             )
             .route(
                 "/api/config/scene/config/evening_scene",
-                route_post(|| async { Json(json!({"result":"ok"})) }),
+                get(|| async { Json(json!({"id":"evening_scene","name":"Evening","secret":"authorized-scene"})) })
+                    .post(|| async { Json(json!({"result":"ok"})) }),
             )
             .route(
                 "/api/config/automation/config/arrival_lights",
-                route_post(|| async { Json(json!({"result":"ok"})) }),
+                get(|| async { Json(json!({"id":"arrival_lights","alias":"Arrival","secret":"authorized-automation"})) })
+                    .post(|| async { Json(json!({"result":"ok"})) }),
             );
         let (origin, task) = serve(router).await;
         (url::Url::parse(&origin).unwrap(), task)
@@ -1329,6 +1439,10 @@ mod tests {
             "camera.snapshot",
             "automation.validate",
             "automation.traces",
+            "automation.list",
+            "automation.get",
+            "scene.list",
+            "scene.get",
         ] {
             assert!(query_schema.contains(action), "query missing {action}");
         }
@@ -1346,7 +1460,7 @@ mod tests {
         let actions = help["result"]["structuredContent"]["actions"]
             .as_array()
             .unwrap();
-        assert_eq!(actions.len(), 2);
+        assert_eq!(actions.len(), 4);
         assert!(
             actions
                 .iter()
@@ -1356,6 +1470,22 @@ mod tests {
             actions
                 .iter()
                 .any(|entry| entry["action"] == "automation.traces")
+        );
+        let (_, scene_help) = post(
+            &endpoint,
+            request(
+                "tools/call",
+                "help.scene",
+                json!({"name":TOOL_NAME,"arguments":{"action":"help.scene"}}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            scene_help["result"]["structuredContent"]["actions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
         );
         task.abort();
     }
@@ -1535,6 +1665,38 @@ mod tests {
                         "finish":"2026-08-10T11:00:02Z","duration_ms":2000,"state":"stopped",
                         "script_execution":"failed","not_triggered":false,"error_present":true,
                         "error_category":"execution_error"}]
+                }),
+            ),
+            (
+                TOOL_NAME,
+                "automation.list",
+                json!({"query":"arrival","limit":1}),
+                json!({
+                    "action":"automation.list","entries":[],"total":0,"truncated":false
+                }),
+            ),
+            (
+                TOOL_NAME,
+                "automation.get",
+                json!({"config_key":"arrival_lights"}),
+                json!({
+                    "action":"automation.get","config_key":"arrival_lights",
+                    "config":{"id":"arrival_lights","alias":"Arrival","secret":"authorized-automation"}
+                }),
+            ),
+            (
+                TOOL_NAME,
+                "scene.list",
+                json!({}),
+                json!({"action":"scene.list","entries":[],"total":0,"truncated":false}),
+            ),
+            (
+                TOOL_NAME,
+                "scene.get",
+                json!({"config_key":"evening_scene"}),
+                json!({
+                    "action":"scene.get","config_key":"evening_scene",
+                    "config":{"id":"evening_scene","name":"Evening","secret":"authorized-scene"}
                 }),
             ),
         ] {
@@ -1834,6 +1996,8 @@ mod tests {
                 "automation.traces",
                 json!({"item_id":"bad/id","limit":10}),
             ),
+            (TOOL_NAME, "scene.get", json!({"config_key":"bad/id"})),
+            (TOOL_NAME, "automation.list", json!({"limit":101})),
         ] {
             let (_, response) = post(
                 &endpoint,
@@ -1872,6 +2036,7 @@ mod tests {
             "help.history",
             "help.camera",
             "help.automation",
+            "help.scene",
         ] {
             assert!(serialized.contains(namespace_help));
         }
@@ -1885,6 +2050,7 @@ mod tests {
             ("help.history", "history.get"),
             ("help.camera", "camera.snapshot"),
             ("help.automation", "automation.validate"),
+            ("help.scene", "scene.list"),
         ] {
             let (_, help) = post(
                 &endpoint,
@@ -1895,9 +2061,12 @@ mod tests {
                 ),
             )
             .await;
-            assert_eq!(
-                help["result"]["structuredContent"]["actions"][0]["action"],
-                action
+            assert!(
+                help["result"]["structuredContent"]["actions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["action"] == action)
             );
         }
 
@@ -1912,6 +2081,10 @@ mod tests {
             "camera.snapshot",
             "automation.validate",
             "automation.traces",
+            "automation.list",
+            "automation.get",
+            "scene.list",
+            "scene.get",
         ] {
             assert!(schema.contains(action));
         }

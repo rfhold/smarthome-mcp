@@ -8,7 +8,10 @@ mod list_entities;
 mod matter;
 mod thread;
 
-pub use authoring::{AutomationTracesInput, AutomationValidateInput, ConfigUpsertInput};
+pub use authoring::{
+    AutomationTracesInput, AutomationValidateInput, ConfigGetInput, ConfigListInput,
+    ConfigUpsertInput,
+};
 pub use camera_snapshot::CameraSnapshotInput;
 pub use controls::{
     ClimateTemperatureInput, CoverPositionInput, EntityControlInput, FanPercentageInput,
@@ -23,7 +26,10 @@ pub use thread::{
     DiscoverRoutersInput, SetPreferredDatasetInput, SetPreferredRouterInput, ThreadEmptyInput,
 };
 
-pub(crate) use authoring::{AutomationTracesQuery, AutomationValidation, ConfigUpsert};
+pub(crate) use authoring::{
+    AutomationTracesQuery, AutomationValidation, ConfigGetQuery, ConfigListQuery, ConfigUpsert,
+    valid_config_key, validate_native_json,
+};
 pub(crate) use camera_snapshot::CameraSnapshotQuery;
 pub(crate) use controls::{Control, ControlAction};
 pub(crate) use get_history::HistoryQuery;

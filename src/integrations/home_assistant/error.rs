@@ -9,6 +9,7 @@ pub enum Error {
     NotAllowed,
     NotMatterDevice,
     NotFound,
+    ConfigNotFound,
     RequestRejected,
     UpstreamUnavailable,
     ResponseTooLarge,
@@ -51,6 +52,11 @@ impl Error {
             Self::NotFound => (
                 "entity_not_found",
                 "One or more requested entities were not found.".to_owned(),
+                false,
+            ),
+            Self::ConfigNotFound => (
+                "config_not_found",
+                "The requested Home Assistant configuration was not found.".to_owned(),
                 false,
             ),
             Self::RequestRejected => (
@@ -113,5 +119,21 @@ mod tests {
             assert_eq!(value["structuredContent"]["error"]["retryable"], retryable);
             assert!(!serde_json::to_string(&value).unwrap().contains("query"));
         }
+    }
+
+    #[test]
+    fn config_not_found_is_specific_and_private() {
+        let value = Error::ConfigNotFound
+            .into_tool_error("get automation")
+            .into_mcp_result()
+            .raw;
+        assert_eq!(
+            value["structuredContent"]["error"]["code"],
+            "config_not_found"
+        );
+        assert_eq!(
+            value["structuredContent"]["error"]["message"],
+            "The requested Home Assistant configuration was not found."
+        );
     }
 }

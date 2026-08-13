@@ -1,6 +1,7 @@
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde_json::{Map, Value};
+use unicode_casefold::UnicodeCaseFold;
 
 const MAX_NATIVE_CONFIG_BYTES: usize = 256 * 1024;
 const MAX_NATIVE_CONFIG_DEPTH: usize = 32;
@@ -12,6 +13,23 @@ pub struct ConfigUpsertInput {
     pub config_key: String,
     /// Complete native Home Assistant scene or automation configuration object.
     pub config: Value,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigListInput {
+    /// Optional case-insensitive match against config key, entity ID, or name.
+    pub query: Option<String>,
+    /// Maximum entries to return. Defaults to 50 and cannot exceed 100.
+    #[schemars(range(min = 1, max = 100))]
+    pub limit: Option<u8>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigGetInput {
+    /// Stable Home Assistant config key using lowercase letters, digits, and underscores.
+    pub config_key: String,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -46,6 +64,15 @@ pub(crate) struct ConfigUpsert {
     pub(crate) config: Value,
 }
 
+pub(crate) struct ConfigListQuery {
+    pub(crate) query: Option<String>,
+    pub(crate) limit: usize,
+}
+
+pub(crate) struct ConfigGetQuery {
+    pub(crate) config_key: String,
+}
+
 pub(crate) struct AutomationValidation {
     pub(crate) sections: Map<String, Value>,
 }
@@ -71,6 +98,35 @@ impl ConfigUpsertInput {
         Ok(ConfigUpsert {
             config_key: self.config_key,
             config: self.config,
+        })
+    }
+}
+
+impl ConfigListInput {
+    pub(crate) fn validate(self) -> Result<ConfigListQuery, ()> {
+        let limit = self.limit.unwrap_or(50);
+        if !(1..=100).contains(&limit)
+            || self
+                .query
+                .as_ref()
+                .is_some_and(|query| query.len() > 256 || query.chars().any(char::is_control))
+        {
+            return Err(());
+        }
+        Ok(ConfigListQuery {
+            query: self.query.map(|query| query.case_fold().collect()),
+            limit: usize::from(limit),
+        })
+    }
+}
+
+impl ConfigGetInput {
+    pub(crate) fn validate(self) -> Result<ConfigGetQuery, ()> {
+        if !valid_config_key(&self.config_key) {
+            return Err(());
+        }
+        Ok(ConfigGetQuery {
+            config_key: self.config_key,
         })
     }
 }
@@ -120,7 +176,7 @@ fn normalize_section(
     Ok(())
 }
 
-fn validate_native_json(value: &Value) -> Result<(), ()> {
+pub(crate) fn validate_native_json(value: &Value) -> Result<(), ()> {
     if serde_json::to_vec(value).map_err(|_| ())?.len() > MAX_NATIVE_CONFIG_BYTES
         || json_depth(value) > MAX_NATIVE_CONFIG_DEPTH
     {
@@ -138,7 +194,7 @@ fn json_depth(value: &Value) -> usize {
     }
 }
 
-fn valid_config_key(value: &str) -> bool {
+pub(crate) fn valid_config_key(value: &str) -> bool {
     !value.is_empty()
         && value.len() <= 64
         && value
@@ -270,10 +326,56 @@ mod tests {
     fn schemas_are_closed() {
         for schema in [
             serde_json::to_value(schemars::schema_for!(ConfigUpsertInput)).unwrap(),
+            serde_json::to_value(schemars::schema_for!(ConfigListInput)).unwrap(),
+            serde_json::to_value(schemars::schema_for!(ConfigGetInput)).unwrap(),
             serde_json::to_value(schemars::schema_for!(AutomationValidateInput)).unwrap(),
             serde_json::to_value(schemars::schema_for!(AutomationTracesInput)).unwrap(),
         ] {
             assert_eq!(schema["additionalProperties"], false);
         }
+    }
+
+    #[test]
+    fn config_read_inputs_are_bounded_and_normalized() {
+        let list = ConfigListInput {
+            query: Some("Evening Scene".to_owned()),
+            limit: None,
+        }
+        .validate()
+        .unwrap();
+        assert_eq!(list.query.as_deref(), Some("evening scene"));
+        assert_eq!(list.limit, 50);
+        for limit in [0, 101] {
+            assert!(
+                ConfigListInput {
+                    query: None,
+                    limit: Some(limit)
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        assert!(
+            ConfigListInput {
+                query: Some("bad\nquery".to_owned()),
+                limit: None
+            }
+            .validate()
+            .is_err()
+        );
+        assert!(
+            ConfigGetInput {
+                config_key: "safe_key".to_owned()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            ConfigGetInput {
+                config_key: "bad/key".to_owned()
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

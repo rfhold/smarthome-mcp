@@ -68,14 +68,16 @@ Tests must cover the [Home Assistant specifications](../home-assistant/README.md
 - `scene.upsert` and `automation.upsert` closed wrappers, safe bounded single-segment keys, object shape, encoded-byte, nesting-depth, and transport bounds;
 - acceptance of an absent top-level `id` or a string `id` equal to `config_key`, with rejection of every other value or type;
 - complete native scene and automation JSON forwarding to only the fixed admin config POSTs, with intentional matching-key replacement;
-- upserts without exposure lookup or recursive reference authorization, plus rejection of config reads, deletes, and caller-selected routing;
+- upserts and config reads without exposure lookup or recursive reference authorization, plus rejection of deletes and caller-selected routing;
+- bounded editor-managed scene and automation discovery from `/api/states`, safe-ID filtering, case-insensitive search, deterministic sort, limit, count, truncation, and omission of YAML-only entries and arbitrary attributes;
+- exact fixed config GET routing, complete bounded native object output, and rejection of malformed, oversized, or excessively nested responses;
 - minimal upsert acknowledgment that does not claim active operation after Home Assistant schedules its asynchronous reload;
 - `automation.validate` routing only to WebSocket `validate_config`, bounded projected acceptance, and no stored-config read;
 - `automation.traces` routing only to WebSocket `trace/list` with fixed `automation` domain and one validated item ID;
 - bounded trace summaries with only run ID, time, duration, state, execution status, not-triggered status, and safe error presence or category;
 - exclusion of raw errors, last steps, config, variables, state or service data, contexts, full traces, `trace/get`, debugging, subscriptions, and script execution;
 - clear result semantics: validation reflects current acceptance, traces describe past runs, and neither guarantees future behavior;
-- absence of config keys, item IDs, native config, trace data, and raw errors from telemetry and safe errors;
+- absence of config keys, entity IDs, names, item IDs, native config, trace data, and raw errors from telemetry and safe errors;
 - endpoint-wide `mcp:use` authority for all six tools, including Thread selection and Matter interview without a separate per-tool grant;
 - redirect denial, body/frame/URL/time/concurrency bounds, cancellation, and permit release; and
 - stable source-free error codes without URLs, credentials, bodies, entity IDs, or state data.
@@ -97,7 +99,7 @@ Before preview acceptance, record separate evidence for:
 | PostgreSQL | Embedded migrations, expiry, one-shot state, replay prevention, refresh rotation, and encrypted signing-key persistence against a disposable database. |
 | Authentik | Discovery, browser login, callback validation, and local token issuance. |
 | Kuri client | DCR, CIMD, loopback authorization, refresh, exact resource binding, and discovery and invocation of all six progressive tools. |
-| Home Assistant | Controlled exposure, bounded reads, fixed service calls, scene and automation replacement, asynchronous reload behavior, `validate_config`, projected `trace/list`, Thread selection, and projected Matter operations for non-sensitive fixtures. |
+| Home Assistant | Controlled exposure, bounded reads, fixed service calls, editor-managed scene and automation discovery and complete reads, replacement, asynchronous reload behavior, `validate_config`, projected `trace/list`, Thread selection, and projected Matter operations for non-sensitive fixtures. |
 | Container | Multi-architecture build, UID, revision label, private-material inspection, and startup with controlled dependencies. |
 | Preview | Authorized browser login, authenticated `/mcp`, bounded HA, Thread, and Matter operations, telemetry, probes, and secret non-disclosure. |
 
