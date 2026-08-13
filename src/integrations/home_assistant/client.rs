@@ -26,9 +26,10 @@ use crate::{config::Secret, http_client};
 use super::{
     Error,
     actions::{
-        CameraSnapshotQuery, Control, DevicesQuery, EntitiesQuery, HistoryQuery, MatterDeviceQuery,
-        MatterDevicesQuery, PreferredDatasetCommand, PreferredRouterCommand, RouterDiscoveryQuery,
-        StatesQuery, valid_entity_id,
+        AutomationTracesQuery, AutomationValidation, CameraSnapshotQuery, ConfigUpsert, Control,
+        DevicesQuery, EntitiesQuery, HistoryQuery, MatterDeviceQuery, MatterDevicesQuery,
+        PreferredDatasetCommand, PreferredRouterCommand, RouterDiscoveryQuery, StatesQuery,
+        valid_entity_id,
     },
     telemetry::{MetricsGuard, request_outcome},
 };
@@ -58,6 +59,8 @@ const THREAD_SET_PREFERRED_ROUTER: &str = "thread/set_preferred_border_agent";
 const MATTER_NODE_DIAGNOSTICS: &str = "matter/node_diagnostics";
 const MATTER_PING_NODE: &str = "matter/ping_node";
 const MATTER_INTERVIEW_NODE: &str = "matter/interview_node";
+const AUTOMATION_VALIDATE: &str = "validate_config";
+const AUTOMATION_TRACE_LIST: &str = "trace/list";
 
 type HomeAssistantSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -216,6 +219,23 @@ struct MatterDevice {
     area_name: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct AutomationTrace {
+    run_id: String,
+    start: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    finish: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<i64>,
+    state: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    script_execution: Option<String>,
+    not_triggered: bool,
+    error_present: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_category: Option<&'static str>,
+}
+
 pub(crate) struct CameraSnapshot {
     pub(crate) entity_id: String,
     pub(crate) mime_type: &'static str,
@@ -253,6 +273,11 @@ impl HomeAssistantClient {
             concurrency: Arc::new(Semaphore::new(MAX_CONCURRENT_QUERIES)),
             timeout,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_full_test_capacity(&self) -> bool {
+        self.concurrency.available_permits() == MAX_CONCURRENT_QUERIES
     }
 
     pub(crate) async fn list_entities(&self, query: &EntitiesQuery) -> Result<Value, Error> {
@@ -810,6 +835,103 @@ impl HomeAssistantClient {
         result
     }
 
+    pub(crate) async fn upsert_scene(&self, command: &ConfigUpsert) -> Result<Value, Error> {
+        self.upsert_config("scene.upsert", "scene", command).await
+    }
+
+    pub(crate) async fn upsert_automation(&self, command: &ConfigUpsert) -> Result<Value, Error> {
+        self.upsert_config("automation.upsert", "automation", command)
+            .await
+    }
+
+    pub(crate) async fn validate_automation(
+        &self,
+        validation: &AutomationValidation,
+    ) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let action = "automation.validate";
+        let mut metrics = MetricsGuard::new(action);
+        let span = operation_span("home_assistant.query", action);
+        let result = tokio::time::timeout(self.timeout, async {
+            let mut command = validation.sections.clone();
+            command.insert("id".to_owned(), json!(1));
+            command.insert("type".to_owned(), json!(AUTOMATION_VALIDATE));
+            let mut socket = self.open_websocket().await?;
+            let raw = self
+                .websocket_command(&mut socket, 1, Value::Object(command))
+                .await?;
+            let _ = socket.close(None).await;
+            let sections = normalize_validation_result(raw, &validation.sections)?;
+            bounded_output(json!({"action":action,"sections":sections}))
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
+    pub(crate) async fn automation_traces(
+        &self,
+        query: &AutomationTracesQuery,
+    ) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let action = "automation.traces";
+        let mut metrics = MetricsGuard::new(action);
+        let span = operation_span("home_assistant.query", action);
+        let result = tokio::time::timeout(self.timeout, async {
+            let mut socket = self.open_websocket().await?;
+            let raw = self
+                .websocket_command(
+                    &mut socket,
+                    1,
+                    json!({"id":1,"type":AUTOMATION_TRACE_LIST,"domain":"automation","item_id":query.item_id}),
+                )
+                .await?;
+            let _ = socket.close(None).await;
+            let (mut traces, total) = normalize_traces(raw, &query.item_id)?;
+            traces.sort_by(|left, right| right.start.cmp(&left.start));
+            let truncated = traces.len() > query.limit;
+            traces.truncate(query.limit);
+            bounded_output(json!({
+                "action":action,
+                "item_id":query.item_id,
+                "traces":traces,
+                "total":total,
+                "truncated":truncated,
+            }))
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
+    async fn upsert_config(
+        &self,
+        action: &'static str,
+        domain: &'static str,
+        command: &ConfigUpsert,
+    ) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let mut metrics = MetricsGuard::new(action);
+        let span = operation_span("home_assistant.exec", action);
+        let result = tokio::time::timeout(self.timeout, async {
+            let url = self.endpoint(&["api", "config", domain, "config", &command.config_key])?;
+            let response: Value = self.post_json_response(url, &command.config).await?;
+            if response != json!({"result":"ok"}) {
+                return Err(Error::InvalidResponse);
+            }
+            bounded_output(json!({"action":action,"config_key":command.config_key,"accepted":true}))
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
     async fn fixed_websocket_ack(
         &self,
         action: &'static str,
@@ -1201,6 +1323,19 @@ impl HomeAssistantClient {
     }
 
     async fn post_json(&self, url: Url, body: &Value) -> Result<(), Error> {
+        self.post_json_bytes(url, body).await.map(|_| ())
+    }
+
+    async fn post_json_response<T: DeserializeOwned>(
+        &self,
+        url: Url,
+        body: &Value,
+    ) -> Result<T, Error> {
+        let body = self.post_json_bytes(url, body).await?;
+        serde_json::from_slice(&body).map_err(|_| Error::InvalidResponse)
+    }
+
+    async fn post_json_bytes(&self, url: Url, body: &Value) -> Result<Vec<u8>, Error> {
         let mut request_span = http_client::RequestSpan::new(&reqwest::Method::POST);
         let body = serde_json::to_vec(body).map_err(|_| Error::InvalidArguments)?;
         let response = self
@@ -1219,10 +1354,9 @@ impl HomeAssistantClient {
                 Error::UpstreamUnavailable
             })?;
         let body_span = request_span.span();
-        let _ = read_body(response, &mut request_span)
+        read_body(response, &mut request_span)
             .instrument(body_span)
-            .await?;
-        Ok(())
+            .await
     }
 
     async fn open_websocket(&self) -> Result<HomeAssistantSocket, Error> {
@@ -1670,6 +1804,123 @@ fn normalize_ping(value: Value) -> Result<Value, Error> {
     Ok(json!({"addresses":results}))
 }
 
+fn normalize_validation_result(
+    value: Value,
+    requested: &serde_json::Map<String, Value>,
+) -> Result<serde_json::Map<String, Value>, Error> {
+    let raw = value.as_object().ok_or(Error::InvalidResponse)?;
+    if raw.len() != requested.len() || raw.keys().any(|key| !requested.contains_key(key)) {
+        return Err(Error::InvalidResponse);
+    }
+    let mut sections = serde_json::Map::new();
+    for name in ["triggers", "conditions", "actions"] {
+        let Some(value) = raw.get(name) else {
+            continue;
+        };
+        let result = value.as_object().ok_or(Error::InvalidResponse)?;
+        if result.keys().any(|key| key != "valid" && key != "error")
+            || !result.contains_key("error")
+        {
+            return Err(Error::InvalidResponse);
+        }
+        let valid = result
+            .get("valid")
+            .and_then(Value::as_bool)
+            .ok_or(Error::InvalidResponse)?;
+        let error_present = match result.get("error") {
+            Some(Value::Null) => false,
+            Some(Value::String(_)) => true,
+            _ => return Err(Error::InvalidResponse),
+        };
+        if valid == error_present {
+            return Err(Error::InvalidResponse);
+        }
+        sections.insert(
+            name.to_owned(),
+            json!({"valid":valid,"error_present":error_present}),
+        );
+    }
+    Ok(sections)
+}
+
+fn normalize_traces(value: Value, item_id: &str) -> Result<(Vec<AutomationTrace>, usize), Error> {
+    let values = value.as_array().ok_or(Error::InvalidResponse)?;
+    if values.len() > 1_000 {
+        return Err(Error::ResponseTooLarge);
+    }
+    let traces = values
+        .iter()
+        .map(|value| normalize_trace(value, item_id))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((traces, values.len()))
+}
+
+fn normalize_trace(value: &Value, item_id: &str) -> Result<AutomationTrace, Error> {
+    let object = value.as_object().ok_or(Error::InvalidResponse)?;
+    if object.get("domain").and_then(Value::as_str) != Some("automation")
+        || object.get("item_id").and_then(Value::as_str) != Some(item_id)
+    {
+        return Err(Error::InvalidResponse);
+    }
+    let run_id = bounded_required_string(object.get("run_id"), 128)?;
+    if !run_id
+        .bytes()
+        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+    {
+        return Err(Error::InvalidResponse);
+    }
+    let timestamps = object
+        .get("timestamp")
+        .and_then(Value::as_object)
+        .ok_or(Error::InvalidResponse)?;
+    let start = bounded_required_string(timestamps.get("start"), 64)?;
+    let start_time =
+        chrono::DateTime::parse_from_rfc3339(&start).map_err(|_| Error::InvalidResponse)?;
+    let finish = bounded_optional_present_string(timestamps.get("finish"), 64)?;
+    let duration_ms = finish
+        .as_ref()
+        .map(|finish| {
+            let finish =
+                chrono::DateTime::parse_from_rfc3339(finish).map_err(|_| Error::InvalidResponse)?;
+            let duration = finish.signed_duration_since(start_time);
+            if duration.num_milliseconds() < 0 {
+                return Err(Error::InvalidResponse);
+            }
+            Ok(duration.num_milliseconds())
+        })
+        .transpose()?;
+    let state = enum_string(
+        object.get("state"),
+        &["running", "stopped", "finished", "cancelled", "error"],
+    )?;
+    let script_execution = match object.get("script_execution") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(value)) => match value.as_str() {
+            "finished" | "cancelled" | "aborted" | "failed" | "error" => Some(value.clone()),
+            _ => None,
+        },
+        Some(_) => return Err(Error::InvalidResponse),
+    };
+    let not_triggered = match object.get("not_triggered") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(value)) => *value,
+        Some(_) => return Err(Error::InvalidResponse),
+    };
+    let error = object.get("error").filter(|value| !value.is_null());
+    let error_category = error.map(|_| "execution_error");
+    Ok(AutomationTrace {
+        run_id,
+        start,
+        finish,
+        duration_ms,
+        state,
+        script_execution,
+        not_triggered,
+        error_present: error.is_some(),
+        error_category,
+    })
+}
+
 fn validate_ip_address(value: &str) -> Result<(), Error> {
     if value.parse::<std::net::IpAddr>().is_ok() {
         return Ok(());
@@ -1986,7 +2237,8 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt as _;
 
     use crate::integrations::home_assistant::actions::{
-        ControlAction, EntityControlInput, LightTurnOnInput,
+        AutomationTracesQuery, AutomationValidation, ConfigUpsert, ControlAction,
+        EntityControlInput, LightTurnOnInput,
     };
 
     use super::*;
@@ -2022,6 +2274,9 @@ mod tests {
         service_status: StatusCode,
         service_body: Vec<u8>,
         service_delay: Option<Duration>,
+        config_response: Value,
+        config_delay: Option<Duration>,
+        websocket_delays: HashMap<&'static str, Duration>,
         websocket_calls: Arc<AtomicUsize>,
         state_calls: Arc<AtomicUsize>,
         camera_calls: Arc<AtomicUsize>,
@@ -2055,6 +2310,9 @@ mod tests {
                 service_status: StatusCode::OK,
                 service_body: b"[{\"must_not_leak\":true}]".to_vec(),
                 service_delay: None,
+                config_response: json!({"result":"ok"}),
+                config_delay: None,
+                websocket_delays: HashMap::new(),
                 websocket_calls: Arc::new(AtomicUsize::new(0)),
                 state_calls: Arc::new(AtomicUsize::new(0)),
                 camera_calls: Arc::new(AtomicUsize::new(0)),
@@ -2145,6 +2403,21 @@ mod tests {
 
         fn with_service_delay(mut self, delay: Duration) -> Self {
             self.service_delay = Some(delay);
+            self
+        }
+
+        fn with_config_response(mut self, response: Value) -> Self {
+            self.config_response = response;
+            self
+        }
+
+        fn with_config_delay(mut self, delay: Duration) -> Self {
+            self.config_delay = Some(delay);
+            self
+        }
+
+        fn with_websocket_delay(mut self, command: &'static str, delay: Duration) -> Self {
+            self.websocket_delays.insert(command, delay);
             self
         }
     }
@@ -3436,6 +3709,10 @@ mod tests {
         let (control_result, control_traceparent) =
             traced_control(control_mock, Duration::from_secs(2), &dispatch).await;
         assert!(control_result.is_ok());
+        let authoring_mock = MockHomeAssistant::new(json!({}), json!([]), json!([]));
+        let (authoring_result, authoring_traceparent) =
+            traced_upsert(authoring_mock, Duration::from_secs(2), &dispatch).await;
+        assert!(authoring_result.is_ok());
 
         provider.force_flush().unwrap();
         let spans = exporter.get_finished_spans().unwrap();
@@ -3447,13 +3724,18 @@ mod tests {
             .iter()
             .filter(|span| span.name == "home_assistant.exec")
             .collect::<Vec<_>>();
+        let operation_spans = spans
+            .iter()
+            .filter(|span| span.name == "home_assistant.operation")
+            .collect::<Vec<_>>();
         let client_spans = spans
             .iter()
             .filter(|span| span.name == "http.client.request")
             .collect::<Vec<_>>();
         assert_eq!(query_spans.len(), 6);
         assert_eq!(exec_spans.len(), 1);
-        assert_eq!(client_spans.len(), 7);
+        assert_eq!(operation_spans.len(), 1);
+        assert_eq!(client_spans.len(), 8);
 
         for traceparent in [
             success_traceparent,
@@ -3463,16 +3745,24 @@ mod tests {
             snapshot_traceparent,
             invalid_snapshot_traceparent,
             control_traceparent,
+            authoring_traceparent,
         ] {
             assert_traceparent_matches_client_span(&traceparent, &client_spans);
         }
 
         for client_span in &client_spans {
             assert_eq!(client_span.span_kind, SpanKind::Client);
-            assert!(query_spans.iter().chain(&exec_spans).any(|operation_span| {
-                client_span.parent_span_id == operation_span.span_context.span_id()
-                    && client_span.span_context.trace_id() == operation_span.span_context.trace_id()
-            }));
+            assert!(
+                query_spans
+                    .iter()
+                    .chain(&exec_spans)
+                    .chain(&operation_spans)
+                    .any(|operation_span| {
+                        client_span.parent_span_id == operation_span.span_context.span_id()
+                            && client_span.span_context.trace_id()
+                                == operation_span.span_context.trace_id()
+                    })
+            );
             assert!(span_attribute(client_span, "outcome").is_some_and(|value| !value.is_empty()));
             assert_span_is_privacy_bounded(client_span);
         }
@@ -3485,25 +3775,26 @@ mod tests {
                 .count(),
             6
         );
-        let post_span = client_spans
-            .iter()
-            .copied()
-            .find(|span| span_attribute(span, "http.request.method").as_deref() == Some("POST"))
-            .unwrap();
         assert_eq!(
-            span_attribute(post_span, "outcome").as_deref(),
-            Some("success")
+            client_spans
+                .iter()
+                .filter(
+                    |span| span_attribute(span, "http.request.method").as_deref() == Some("POST")
+                )
+                .count(),
+            2
         );
-        let exec_span = exec_spans[0];
-        assert_eq!(
-            span_attribute(exec_span, "action").as_deref(),
-            Some("light.turn_on")
-        );
-        assert_eq!(
-            span_attribute(exec_span, "outcome").as_deref(),
-            Some("success")
-        );
-        assert_span_is_privacy_bounded(exec_span);
+        for exec_span in exec_spans.iter().chain(&operation_spans) {
+            assert!(matches!(
+                span_attribute(exec_span, "action").as_deref(),
+                Some("light.turn_on" | "scene.upsert")
+            ));
+            assert_eq!(
+                span_attribute(exec_span, "outcome").as_deref(),
+                Some("success")
+            );
+            assert_span_is_privacy_bounded(exec_span);
+        }
 
         let success_span = client_span(&client_spans, "200", "success");
         assert_eq!(success_span.status, Status::Unset);
@@ -3590,6 +3881,30 @@ mod tests {
         (result, traceparents.into_iter().next().unwrap())
     }
 
+    async fn traced_upsert(
+        mock: MockHomeAssistant,
+        timeout: Duration,
+        dispatch: &tracing::Dispatch,
+    ) -> (Result<Value, Error>, String) {
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("sensitive-authoring-token".to_owned()),
+            timeout,
+        );
+        let result = client
+            .upsert_scene(&ConfigUpsert {
+                config_key: "private_authoring_key".to_owned(),
+                config: json!({"id":"private_authoring_key","template":"must-not-leak"}),
+            })
+            .with_subscriber(dispatch.clone())
+            .await;
+        let traceparents = mock.traceparents.lock().unwrap().clone();
+        server.abort();
+        assert_eq!(traceparents.len(), 1);
+        (result, traceparents.into_iter().next().unwrap())
+    }
+
     fn assert_traceparent_matches_client_span(traceparent: &str, client_spans: &[&SpanData]) {
         let parts = traceparent.split('-').collect::<Vec<_>>();
         assert_eq!(parts.len(), 4);
@@ -3659,6 +3974,10 @@ mod tests {
             "light.private_fixture",
             "brightness_pct",
             "must_not_leak",
+            "must-not-leak",
+            "sensitive-authoring-token",
+            "private_authoring_key",
+            "/api/config",
             "authorization",
             "url.",
             "server.",
@@ -4401,6 +4720,244 @@ mod tests {
         server.abort();
     }
 
+    #[tokio::test]
+    async fn config_upserts_use_only_fixed_authenticated_routes_and_strict_acknowledgments() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([]));
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        let scene = ConfigUpsert {
+            config_key: "evening_scene".to_owned(),
+            config: json!({"id":"evening_scene","name":"Evening","entities":{"light.kitchen":{"state":"on"}}}),
+        };
+        let automation = ConfigUpsert {
+            config_key: "arrival_lights".to_owned(),
+            config: json!({"id":"arrival_lights","alias":"Arrival","triggers":[],"actions":[]}),
+        };
+
+        assert_eq!(
+            client.upsert_scene(&scene).await.unwrap(),
+            json!({"action":"scene.upsert","config_key":"evening_scene","accepted":true})
+        );
+        assert_eq!(
+            client.upsert_automation(&automation).await.unwrap(),
+            json!({"action":"automation.upsert","config_key":"arrival_lights","accepted":true})
+        );
+        assert_eq!(mock.websocket_calls.load(Ordering::Relaxed), 0);
+        assert_eq!(
+            mock.requests.lock().unwrap().as_slice(),
+            [
+                "http-auth:Bearer test-token",
+                "config:/api/config/scene/config/evening_scene",
+                "config-body:{\"entities\":{\"light.kitchen\":{\"state\":\"on\"}},\"id\":\"evening_scene\",\"name\":\"Evening\"}",
+                "http-auth:Bearer test-token",
+                "config:/api/config/automation/config/arrival_lights",
+                "config-body:{\"actions\":[],\"alias\":\"Arrival\",\"id\":\"arrival_lights\",\"triggers\":[]}",
+            ]
+        );
+        server.abort();
+
+        let invalid = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_config_response(json!({"result":"ok","details":"must-not-be-accepted"}));
+        let (origin, server) = serve(invalid).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            client.upsert_scene(&scene).await,
+            Err(Error::InvalidResponse)
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn authoring_timeouts_release_permits_and_oversized_responses_fail_safely() {
+        let command = ConfigUpsert {
+            config_key: "private_key".to_owned(),
+            config: json!({"id":"private_key","secret":"must-not-leak"}),
+        };
+        let delayed = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_config_delay(Duration::from_secs(1));
+        let (origin, server) = serve(delayed).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_millis(50),
+        );
+        assert_eq!(client.upsert_scene(&command).await, Err(Error::Timeout));
+        let permits = (0..MAX_CONCURRENT_QUERIES)
+            .map(|_| client.admit().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(permits.len(), MAX_CONCURRENT_QUERIES);
+        drop(permits);
+        server.abort();
+
+        let delayed = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_websocket_delay(AUTOMATION_TRACE_LIST, Duration::from_secs(1));
+        let (origin, server) = serve(delayed).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_millis(50),
+        );
+        let query = AutomationTracesQuery {
+            item_id: "private_key".to_owned(),
+            limit: 10,
+        };
+        assert_eq!(client.automation_traces(&query).await, Err(Error::Timeout));
+        let permits = (0..MAX_CONCURRENT_QUERIES)
+            .map(|_| client.admit().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(permits.len(), MAX_CONCURRENT_QUERIES);
+        drop(permits);
+        server.abort();
+
+        let oversized = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_config_response(json!({"payload":"x".repeat(MAX_RESPONSE_BYTES)}));
+        let (origin, server) = serve(oversized).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            client.upsert_scene(&command).await,
+            Err(Error::ResponseTooLarge)
+        );
+        server.abort();
+
+        let oversized_trace = json!({
+            "id":1,"type":"result","success":true,
+            "result":"x".repeat(MAX_WS_MESSAGE_BYTES)
+        });
+        let oversized = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_registry_response(AUTOMATION_TRACE_LIST, oversized_trace);
+        let (origin, server) = serve(oversized).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            client.automation_traces(&query).await,
+            Err(Error::ResponseTooLarge)
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn automation_validation_uses_exact_command_and_redacts_error_strings() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([])).with_registry_response(
+            AUTOMATION_VALIDATE,
+            ws_result(
+                1,
+                json!({
+                    "triggers":{"valid":true,"error":null},
+                    "actions":{"valid":false,"error":"private template and service must-not-leak"}
+                }),
+            ),
+        );
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        let validation = AutomationValidation {
+            sections: serde_json::Map::from_iter([
+                ("triggers".to_owned(), json!([{"platform":"state"}])),
+                ("actions".to_owned(), json!([{"service":"light.turn_on"}])),
+            ]),
+        };
+        let output = client.validate_automation(&validation).await.unwrap();
+        assert_eq!(
+            output["sections"]["triggers"],
+            json!({"valid":true,"error_present":false})
+        );
+        assert_eq!(
+            output["sections"]["actions"],
+            json!({"valid":false,"error_present":true})
+        );
+        assert!(
+            !serde_json::to_string(&output)
+                .unwrap()
+                .contains("must-not-leak")
+        );
+        assert_eq!(
+            mock.commands.lock().unwrap().as_slice(),
+            &[json!({
+                "id":1,"type":"validate_config",
+                "triggers":[{"platform":"state"}],
+                "actions":[{"service":"light.turn_on"}]
+            })]
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn automation_traces_use_exact_list_command_and_strict_safe_projection() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([])).with_registry_response(
+            AUTOMATION_TRACE_LIST,
+            ws_result(1, json!([
+                {
+                    "run_id":"older","state":"stopped","script_execution":"finished",
+                    "timestamp":{"start":"2026-08-10T10:00:00Z","finish":"2026-08-10T10:00:01.250Z"},
+                    "domain":"automation","item_id":"arrival_lights","not_triggered":false,
+                    "error":null,"last_step":"action/0","config":{"secret":"must-not-leak"},
+                    "trace":{"variables":{"secret":"must-not-leak"}}
+                },
+                {
+                    "run_id":"newer","state":"stopped","script_execution":"failed",
+                    "timestamp":{"start":"2026-08-10T11:00:00Z","finish":"2026-08-10T11:00:02Z"},
+                    "domain":"automation","item_id":"arrival_lights","not_triggered":true,
+                    "error":{"message":"must-not-leak"},"last_step":"trigger/0",
+                    "context":{"user_id":"must-not-leak"},"blueprint_inputs":{"secret":true}
+                }
+            ])),
+        );
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".to_owned()),
+            Duration::from_secs(2),
+        );
+        let output = client
+            .automation_traces(&AutomationTracesQuery {
+                item_id: "arrival_lights".to_owned(),
+                limit: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(output["traces"][0]["run_id"], "newer");
+        assert_eq!(output["traces"][0]["duration_ms"], 2000);
+        assert_eq!(output["traces"][0]["error_present"], true);
+        assert_eq!(output["traces"][0]["error_category"], "execution_error");
+        assert_eq!(output["total"], 2);
+        assert_eq!(output["truncated"], true);
+        let serialized = serde_json::to_string(&output).unwrap();
+        assert!(!serialized.contains("must-not-leak"));
+        for forbidden in [
+            "last_step",
+            "config",
+            "trace",
+            "variables",
+            "context",
+            "blueprint_inputs",
+        ] {
+            assert!(output["traces"][0].get(forbidden).is_none());
+        }
+        assert_eq!(
+            mock.commands.lock().unwrap().as_slice(),
+            &[json!({"id":1,"type":"trace/list","domain":"automation","item_id":"arrival_lights"})]
+        );
+        server.abort();
+    }
+
     fn raw_state(entity_id: &str, state: &str, friendly_name: &str) -> Value {
         json!({
             "entity_id": entity_id,
@@ -4470,6 +5027,10 @@ mod tests {
             .route("/api/camera_proxy/{entity_id}", get(camera_snapshot))
             .route("/api/history/period/{start}", get(history))
             .route("/api/services/{domain}/{service}", post(service_call))
+            .route(
+                "/api/config/{domain}/config/{config_key}",
+                post(config_upsert),
+            )
             .with_state(mock);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -4531,6 +5092,9 @@ mod tests {
                     _ => ws_result(id, Value::Null),
                 },
             };
+            if let Some(delay) = mock.websocket_delays.get(command_type) {
+                tokio::time::sleep(*delay).await;
+            }
             if let Some(events) = mock.websocket_events_before_response.get(command_type) {
                 for event in events {
                     if socket
@@ -4697,6 +5261,28 @@ mod tests {
             Body::from(mock.service_body)
         };
         response.body(body).unwrap()
+    }
+
+    async fn config_upsert(
+        State(mock): State<MockHomeAssistant>,
+        Path((domain, config_key)): Path<(String, String)>,
+        OriginalUri(uri): OriginalUri,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response {
+        record_http_auth(&mock, &headers);
+        if !matches!(domain.as_str(), "scene" | "automation") || config_key.is_empty() {
+            return StatusCode::NOT_FOUND.into_response();
+        }
+        {
+            let mut requests = mock.requests.lock().unwrap();
+            requests.push(format!("config:{uri}"));
+            requests.push(format!("config-body:{}", String::from_utf8_lossy(&body)));
+        }
+        if let Some(delay) = mock.config_delay {
+            tokio::time::sleep(delay).await;
+        }
+        Json(mock.config_response).into_response()
     }
 
     fn record_http_auth(mock: &MockHomeAssistant, headers: &HeaderMap) {

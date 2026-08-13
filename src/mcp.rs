@@ -18,9 +18,10 @@ use crate::{
     integrations::home_assistant::{
         Error as HomeAssistantError,
         actions::{
-            CameraSnapshotInput, ClimateTemperatureInput, Control, ControlAction,
-            CoverPositionInput, DiscoverRoutersInput, EntityControlInput, FanPercentageInput,
-            GetHistoryInput, GetStatesInput, LightTurnOnInput, ListDevicesInput, ListEntitiesInput,
+            AutomationTracesInput, AutomationValidateInput, CameraSnapshotInput,
+            ClimateTemperatureInput, ConfigUpsertInput, Control, ControlAction, CoverPositionInput,
+            DiscoverRoutersInput, EntityControlInput, FanPercentageInput, GetHistoryInput,
+            GetStatesInput, LightTurnOnInput, ListDevicesInput, ListEntitiesInput,
             ListMatterDevicesInput, MatterDeviceInput, MatterEmptyInput, MediaPlayerVolumeInput,
             SetPreferredDatasetInput, SetPreferredRouterInput, ThreadEmptyInput,
         },
@@ -75,7 +76,7 @@ pub fn router(
     description = "Authenticated, policy-bounded smart-home tools.",
     tool(
         name = "home_assistant_query",
-        description = "Read explicitly Assist-exposed Home Assistant entities, history, and camera frames.",
+        description = "Read bounded Home Assistant entity data, validate automation sections, and summarize automation traces.",
         annotations = json!({
             "readOnlyHint": true,
             "destructiveHint": false,
@@ -86,18 +87,20 @@ pub fn router(
         namespace(device, description = "Query Home Assistant devices."),
         namespace(state, description = "Query Home Assistant current states."),
         namespace(history, description = "Query Home Assistant state history."),
-        namespace(camera, description = "Read Home Assistant camera frames.")
+        namespace(camera, description = "Read Home Assistant camera frames."),
+        namespace(automation, description = "Validate automation sections and summarize traces.")
     ),
     tool(
         name = "home_assistant_exec",
-        description = "Operate explicitly Assist-exposed Home Assistant entities with fixed common controls.",
+        description = "Operate Assist-exposed entities and upsert bounded native scene or automation configs.",
         annotations = json!({
             "readOnlyHint": false,
             "destructiveHint": true,
             "idempotentHint": false,
             "openWorldHint": true
         }),
-        namespace(scene, description = "Activate Home Assistant scenes."),
+        namespace(scene, description = "Activate or upsert Home Assistant scenes."),
+        namespace(automation, description = "Upsert Home Assistant automations."),
         namespace(light, description = "Control Home Assistant lights."),
         namespace(switch, description = "Control Home Assistant switches."),
         namespace(fan, description = "Control Home Assistant fans."),
@@ -156,6 +159,114 @@ pub fn router(
     )
 )]
 impl SmarthomeMcp {
+    /// Upsert a complete native scene configuration under a stable key. Home
+    /// Assistant accepts the change for asynchronous reload; activation is not implied.
+    #[action(tool = "home_assistant_exec", name = "scene.upsert")]
+    async fn upsert_scene(
+        &self,
+        input: ConfigUpsertInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let command = match input.validate() {
+            Ok(command) => command,
+            Err(()) => {
+                return Ok(tool_error(
+                    "upsert scene",
+                    HomeAssistantError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.home_assistant.upsert_scene(&command) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => Ok(accepted_result(output)),
+            Err(error) => Ok(tool_error("upsert scene", error)),
+        }
+    }
+
+    /// Upsert a complete native automation configuration under a stable key.
+    /// Acceptance does not guarantee reload completion or future operation.
+    #[action(tool = "home_assistant_exec", name = "automation.upsert")]
+    async fn upsert_automation(
+        &self,
+        input: ConfigUpsertInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let command = match input.validate() {
+            Ok(command) => command,
+            Err(()) => {
+                return Ok(tool_error(
+                    "upsert automation",
+                    HomeAssistantError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.home_assistant.upsert_automation(&command) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => Ok(accepted_result(output)),
+            Err(error) => Ok(tool_error("upsert automation", error)),
+        }
+    }
+
+    /// Validate submitted native automation trigger, condition, and action
+    /// sections. A valid result does not guarantee future operation.
+    #[action(tool = "home_assistant_query", name = "automation.validate")]
+    async fn validate_automation(
+        &self,
+        input: AutomationValidateInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let validation = match input.validate() {
+            Ok(validation) => validation,
+            Err(()) => {
+                return Ok(tool_error(
+                    "validate automation",
+                    HomeAssistantError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.home_assistant.validate_automation(&validation) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => query_result(output),
+            Err(error) => Ok(tool_error("validate automation", error)),
+        }
+    }
+
+    /// Return a bounded newest-first projection of recent automation traces.
+    /// Trace history does not guarantee future operation.
+    #[action(tool = "home_assistant_query", name = "automation.traces")]
+    async fn automation_traces(
+        &self,
+        input: AutomationTracesInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        let query = match input.validate() {
+            Ok(query) => query,
+            Err(()) => {
+                return Ok(tool_error(
+                    "list automation traces",
+                    HomeAssistantError::InvalidArguments,
+                ));
+            }
+        };
+        let result = tokio::select! {
+            result = self.services.home_assistant.automation_traces(&query) => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => query_result(output),
+            Err(error) => Ok(tool_error("list automation traces", error)),
+        }
+    }
+
     /// List current normalized states grouped by Home Assistant device and
     /// effective area. Only entities currently exposed to Assist are included.
     #[action(tool = "home_assistant_query", name = "device.list")]
@@ -909,6 +1020,13 @@ fn control_result(output: serde_json::Value) -> McpToolResult {
     }))
 }
 
+fn accepted_result(output: serde_json::Value) -> McpToolResult {
+    McpToolResult::new(json!({
+        "content": [{"type":"text","text":"Home Assistant accepted the configuration for asynchronous reload."}],
+        "structuredContent": output
+    }))
+}
+
 fn query_result(output: serde_json::Value) -> ServerResult<McpToolResult> {
     mcp::progressive::tool_result(output, None)
 }
@@ -919,23 +1037,79 @@ fn tool_error(action_name: &str, error: HomeAssistantError) -> McpToolResult {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        io,
+        sync::{
+            Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
 
     use axum::{
-        Json,
+        Json, Router,
         body::Bytes,
-        extract::WebSocketUpgrade,
-        response::Response,
+        extract::{State, WebSocketUpgrade},
+        response::{IntoResponse as _, Response},
         routing::{get, post as route_post},
     };
     use mcp::protocol::MCP_PROTOCOL_VERSION;
     use reqwest::{Client, StatusCode};
     use serde_json::Value;
-    use tokio::{net::TcpListener, task::JoinHandle};
+    use tokio::{
+        io::{AsyncReadExt as _, AsyncWriteExt as _},
+        net::TcpListener,
+        sync::Notify,
+        task::JoinHandle,
+    };
+    use tracing::instrument::WithSubscriber as _;
+    use tracing_subscriber::layer::SubscriberExt as _;
 
     use crate::{config::Secret, integrations::home_assistant::HomeAssistantClient};
 
     use super::*;
+
+    struct DropSignal(Arc<AtomicBool>, Arc<Notify>);
+
+    #[derive(Clone)]
+    struct TestLogWriter(Arc<Mutex<Vec<u8>>>);
+
+    struct TestLogGuard(Arc<Mutex<Vec<u8>>>);
+
+    impl io::Write for TestLogGuard {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for TestLogWriter {
+        type Writer = TestLogGuard;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            TestLogGuard(self.0.clone())
+        }
+    }
+
+    impl Drop for DropSignal {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Relaxed);
+            self.1.notify_waiters();
+        }
+    }
+
+    #[derive(Clone)]
+    struct CancellationMock {
+        calls: Arc<AtomicUsize>,
+        started: Arc<Notify>,
+        dropped: Arc<AtomicBool>,
+        dropped_notify: Arc<Notify>,
+        bodies: Arc<Mutex<Vec<String>>>,
+    }
 
     async fn serve(router: Router) -> (String, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1000,6 +1174,14 @@ mod tests {
             .route(
                 "/api/services/light/turn_on",
                 route_post(|| async { Json(json!({"raw_secret":"must-not-leak"})) }),
+            )
+            .route(
+                "/api/config/scene/config/evening_scene",
+                route_post(|| async { Json(json!({"result":"ok"})) }),
+            )
+            .route(
+                "/api/config/automation/config/arrival_lights",
+                route_post(|| async { Json(json!({"result":"ok"})) }),
             );
         let (origin, task) = serve(router).await;
         (url::Url::parse(&origin).unwrap(), task)
@@ -1034,6 +1216,18 @@ mod tests {
                     }),
                     "config/entity_registry/get_entries" => json!({"sensor.allowed":null}),
                     "config/device_registry/list" | "config/area_registry/list" => json!([]),
+                    "validate_config" => json!({
+                        "triggers":{"valid":true,"error":null},
+                        "actions":{"valid":false,"error":"must-not-leak-validation-error"}
+                    }),
+                    "trace/list" => json!([{
+                        "run_id":"run-safe","state":"stopped","script_execution":"failed",
+                        "timestamp":{"start":"2026-08-10T11:00:00Z","finish":"2026-08-10T11:00:02Z"},
+                        "domain":"automation","item_id":"arrival_lights","not_triggered":false,
+                        "error":{"message":"must-not-leak-trace-error"},
+                        "last_step":"action/0","config":{"secret":"must-not-leak-config"},
+                        "trace":{"variables":{"secret":"must-not-leak-variable"}}
+                    }]),
                     _ => break,
                 };
                 socket
@@ -1118,6 +1312,252 @@ mod tests {
             assert_eq!(tool["annotations"]["destructiveHint"], true);
         }
         task.abort();
+    }
+
+    #[tokio::test]
+    async fn authoring_and_evidence_discovery_catalogs_are_explicit_and_closed() {
+        let (endpoint, task) = endpoint().await;
+        let (_, response) = post(&endpoint, request("tools/list", "list", json!({}))).await;
+        let tools = response["result"]["tools"].as_array().unwrap();
+        let query = tools.iter().find(|tool| tool["name"] == TOOL_NAME).unwrap();
+        let query_schema = serde_json::to_string(&query["inputSchema"]).unwrap();
+        for action in [
+            "entity.list",
+            "device.list",
+            "state.get",
+            "history.get",
+            "camera.snapshot",
+            "automation.validate",
+            "automation.traces",
+        ] {
+            assert!(query_schema.contains(action), "query missing {action}");
+        }
+        assert!(query_schema.contains("\"additionalProperties\":false"));
+
+        let (_, help) = post(
+            &endpoint,
+            request(
+                "tools/call",
+                "help.automation",
+                json!({"name":TOOL_NAME,"arguments":{"action":"help.automation"}}),
+            ),
+        )
+        .await;
+        let actions = help["result"]["structuredContent"]["actions"]
+            .as_array()
+            .unwrap();
+        assert_eq!(actions.len(), 2);
+        assert!(
+            actions
+                .iter()
+                .any(|entry| entry["action"] == "automation.validate")
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|entry| entry["action"] == "automation.traces")
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn scene_upsert_caller_cancellation_drops_upstream_and_releases_capacity_privately() {
+        let mock = CancellationMock {
+            calls: Arc::new(AtomicUsize::new(0)),
+            started: Arc::new(Notify::new()),
+            dropped: Arc::new(AtomicBool::new(false)),
+            dropped_notify: Arc::new(Notify::new()),
+            bodies: Arc::new(Mutex::new(Vec::new())),
+        };
+        let router = Router::new()
+            .route(
+                "/api/config/scene/config/cancel_private_key",
+                route_post(delayed_config_upsert),
+            )
+            .with_state(mock.clone());
+        let (origin, home_assistant_task) = serve(router).await;
+        let client = HomeAssistantClient::for_test(
+            url::Url::parse(&origin).unwrap(),
+            Secret("test-token".to_owned()),
+            Duration::from_secs(10),
+        );
+        let handler = Arc::new(SmarthomeMcp {
+            services: Arc::new(Services::new(client.clone())),
+        });
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_span_events(tracing_subscriber::fmt::format::FmtSpan::CLOSE)
+                .with_writer(TestLogWriter(logs.clone())),
+        );
+        let dispatch = tracing::Dispatch::new(subscriber);
+        let (mut input_writer, input_reader) = tokio::io::duplex(64 * 1024);
+        let (mut output_reader, output_writer) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(
+            mcp::server::serve_stream(handler, input_reader, output_writer)
+                .with_subscriber(dispatch),
+        );
+        let call = request(
+            "tools/call",
+            "cancel-authoring",
+            json!({
+                "name":EXEC_TOOL_NAME,
+                "arguments":{
+                    "action":"scene.upsert",
+                    "input":{
+                        "config_key":"cancel_private_key",
+                        "config":{"id":"cancel_private_key","secret":"native-private-sentinel"}
+                    }
+                }
+            }),
+        );
+        let started = mock.started.notified();
+        input_writer
+            .write_all(format!("{call}\n").as_bytes())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), started)
+            .await
+            .unwrap();
+        let cancellation = request(
+            "notifications/cancelled",
+            "unused",
+            json!({"requestId":"cancel-authoring","reason":"caller stopped"}),
+        );
+        let mut cancellation = cancellation;
+        cancellation.as_object_mut().unwrap().remove("id");
+        let dropped = mock.dropped_notify.notified();
+        input_writer
+            .write_all(format!("{cancellation}\n").as_bytes())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), dropped)
+            .await
+            .unwrap();
+        assert!(mock.dropped.load(Ordering::Relaxed));
+        assert!(client.has_full_test_capacity());
+        assert_eq!(
+            client
+                .upsert_scene(
+                    &crate::integrations::home_assistant::actions::ConfigUpsert {
+                        config_key: "cancel_private_key".to_owned(),
+                        config: json!({"id":"cancel_private_key"}),
+                    }
+                )
+                .await
+                .unwrap(),
+            json!({"action":"scene.upsert","config_key":"cancel_private_key","accepted":true})
+        );
+
+        input_writer.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let mut output = String::new();
+        output_reader.read_to_string(&mut output).await.unwrap();
+        if !output.trim().is_empty() {
+            assert_eq!(
+                serde_json::from_str::<Value>(output.trim()).unwrap(),
+                json!({
+                    "jsonrpc":"2.0",
+                    "id":"cancel-authoring",
+                    "error":{"code":-32603,"message":"request cancelled"}
+                })
+            );
+        }
+        assert_eq!(mock.calls.load(Ordering::Relaxed), 2);
+        let bodies = mock.bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2);
+        drop(bodies);
+        let telemetry = String::from_utf8(logs.lock().unwrap().clone()).unwrap();
+        for sentinel in [
+            "cancel_private_key",
+            "native-private-sentinel",
+            "raw-upstream-sentinel",
+        ] {
+            assert!(!output.contains(sentinel));
+            assert!(!telemetry.contains(sentinel));
+        }
+        home_assistant_task.abort();
+    }
+
+    async fn delayed_config_upsert(State(mock): State<CancellationMock>, body: Bytes) -> Response {
+        let call = mock.calls.fetch_add(1, Ordering::Relaxed);
+        mock.bodies
+            .lock()
+            .unwrap()
+            .push(String::from_utf8_lossy(&body).into_owned());
+        if call > 0 {
+            return Json(json!({"result":"ok"})).into_response();
+        }
+        let _drop = DropSignal(mock.dropped.clone(), mock.dropped_notify.clone());
+        mock.started.notify_waiters();
+        std::future::pending::<()>().await;
+        Json(json!({"result":"ok","raw":"raw-upstream-sentinel"})).into_response()
+    }
+
+    #[tokio::test]
+    async fn all_authoring_and_evidence_actions_dispatch_with_safe_results() {
+        let (home_assistant_origin, home_assistant_task) = home_assistant().await;
+        let (endpoint, task) = endpoint_for(home_assistant_origin).await;
+        for (tool, action, input, expected) in [
+            (
+                EXEC_TOOL_NAME,
+                "scene.upsert",
+                json!({"config_key":"evening_scene","config":{"id":"evening_scene","secret":"must-not-leak-scene"}}),
+                json!({"action":"scene.upsert","config_key":"evening_scene","accepted":true}),
+            ),
+            (
+                EXEC_TOOL_NAME,
+                "automation.upsert",
+                json!({"config_key":"arrival_lights","config":{"id":"arrival_lights","secret":"must-not-leak-automation"}}),
+                json!({"action":"automation.upsert","config_key":"arrival_lights","accepted":true}),
+            ),
+            (
+                TOOL_NAME,
+                "automation.validate",
+                json!({"triggers":[],"actions":[]}),
+                json!({"action":"automation.validate","sections":{
+                    "triggers":{"valid":true,"error_present":false},
+                    "actions":{"valid":false,"error_present":true}
+                }}),
+            ),
+            (
+                TOOL_NAME,
+                "automation.traces",
+                json!({"item_id":"arrival_lights","limit":1}),
+                json!({
+                    "action":"automation.traces","item_id":"arrival_lights","total":1,"truncated":false,
+                    "traces":[{"run_id":"run-safe","start":"2026-08-10T11:00:00Z",
+                        "finish":"2026-08-10T11:00:02Z","duration_ms":2000,"state":"stopped",
+                        "script_execution":"failed","not_triggered":false,"error_present":true,
+                        "error_category":"execution_error"}]
+                }),
+            ),
+        ] {
+            let (_, response) = post(
+                &endpoint,
+                request(
+                    "tools/call",
+                    action,
+                    json!({"name":tool,"arguments":{"action":action,"input":input}}),
+                ),
+            )
+            .await;
+            assert_eq!(response["result"]["structuredContent"], expected);
+            let serialized = serde_json::to_string(&response).unwrap();
+            for forbidden in ["must-not-leak", "last_step", "variables", "raw_error"] {
+                assert!(
+                    !serialized.contains(forbidden),
+                    "{action} leaked {forbidden}"
+                );
+            }
+        }
+        task.abort();
+        home_assistant_task.abort();
     }
 
     #[tokio::test]
@@ -1244,6 +1684,8 @@ mod tests {
         let serialized = serde_json::to_string(schema).unwrap();
         for action in [
             "scene.activate",
+            "scene.upsert",
+            "automation.upsert",
             "light.turn_on",
             "light.turn_off",
             "switch.turn_on",
@@ -1269,7 +1711,7 @@ mod tests {
         ] {
             assert!(serialized.contains(action), "missing {action}");
         }
-        assert_eq!(serialized.matches("additionalProperties").count(), 24);
+        assert_eq!(serialized.matches("additionalProperties").count(), 26);
         assert!(serialized.contains("\"additionalProperties\":false"));
         for forbidden in ["toggle", "confirmation", "preset", "source", "template"] {
             assert!(!serialized.contains(forbidden));
@@ -1374,6 +1816,43 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authoring_semantic_validation_rejects_before_home_assistant_contact() {
+        let (endpoint, task) = endpoint().await;
+        for (tool, action, input) in [
+            (
+                EXEC_TOOL_NAME,
+                "scene.upsert",
+                json!({"config_key":"bad/key","config":{}}),
+            ),
+            (
+                TOOL_NAME,
+                "automation.validate",
+                json!({"trigger":{},"triggers":[]}),
+            ),
+            (
+                TOOL_NAME,
+                "automation.traces",
+                json!({"item_id":"bad/id","limit":10}),
+            ),
+        ] {
+            let (_, response) = post(
+                &endpoint,
+                request(
+                    "tools/call",
+                    action,
+                    json!({"name":tool,"arguments":{"action":action,"input":input}}),
+                ),
+            )
+            .await;
+            assert_eq!(
+                response["result"]["structuredContent"]["error"]["code"],
+                "invalid_arguments"
+            );
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn generated_help_and_schema_use_only_dotted_actions() {
         let (endpoint, task) = endpoint().await;
         let (_, response) = post(
@@ -1392,6 +1871,7 @@ mod tests {
             "help.state",
             "help.history",
             "help.camera",
+            "help.automation",
         ] {
             assert!(serialized.contains(namespace_help));
         }
@@ -1404,6 +1884,7 @@ mod tests {
             ("help.state", "state.get"),
             ("help.history", "history.get"),
             ("help.camera", "camera.snapshot"),
+            ("help.automation", "automation.validate"),
         ] {
             let (_, help) = post(
                 &endpoint,
@@ -1429,6 +1910,8 @@ mod tests {
             "state.get",
             "history.get",
             "camera.snapshot",
+            "automation.validate",
+            "automation.traces",
         ] {
             assert!(schema.contains(action));
         }

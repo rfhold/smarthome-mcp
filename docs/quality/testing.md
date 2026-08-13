@@ -41,7 +41,7 @@ Run `git diff --check` before finalizing changes.
 
 Tests must cover the [Home Assistant specifications](../home-assistant/README.md):
 
-- fresh WebSocket authentication and exposure lookup for every invocation;
+- fresh WebSocket authentication and exposure lookup for every entity-targeted invocation;
 - exact exposure command ID and type;
 - explicit `conversation: true` authorization only;
 - fail-closed handling for false, absent, malformed, unauthorized, and unavailable exposure results;
@@ -61,10 +61,21 @@ Tests must cover the [Home Assistant specifications](../home-assistant/README.md
 - camera privacy across errors, logs, traces, and metrics, including absence of identifiers, image data, paths, MIME, authentication data, headers, bodies, and raw errors;
 - separate `home_assistant_exec` discovery and annotations with read-only false, destructive true, idempotent false, and open-world true;
 - the complete [common-control action catalog](../home-assistant/common-controls.md), matching-domain single-entity targeting, unknown-field rejection, and every numeric boundary;
-- fresh exact `conversation: true` exposure before every mutation, with no service POST on denied or malformed exposure;
+- fresh exact `conversation: true` exposure before every common-control mutation, with no service POST on denied or malformed exposure;
 - fixed action-to-service POST mapping and bounded constructed JSON, with no caller-selected service, domain, path, method, headers, origin, or arbitrary data;
 - bounded upstream result consumption and minimal output without upstream wrappers, state, context, or service-response data;
 - rejection of batching, toggle, confirmations, presets, sources, modes, colors, templates, and unapproved actions;
+- `scene.upsert` and `automation.upsert` closed wrappers, safe bounded single-segment keys, object shape, encoded-byte, nesting-depth, and transport bounds;
+- acceptance of an absent top-level `id` or a string `id` equal to `config_key`, with rejection of every other value or type;
+- complete native scene and automation JSON forwarding to only the fixed admin config POSTs, with intentional matching-key replacement;
+- upserts without exposure lookup or recursive reference authorization, plus rejection of config reads, deletes, and caller-selected routing;
+- minimal upsert acknowledgment that does not claim active operation after Home Assistant schedules its asynchronous reload;
+- `automation.validate` routing only to WebSocket `validate_config`, bounded projected acceptance, and no stored-config read;
+- `automation.traces` routing only to WebSocket `trace/list` with fixed `automation` domain and one validated item ID;
+- bounded trace summaries with only run ID, time, duration, state, execution status, not-triggered status, and safe error presence or category;
+- exclusion of raw errors, last steps, config, variables, state or service data, contexts, full traces, `trace/get`, debugging, subscriptions, and script execution;
+- clear result semantics: validation reflects current acceptance, traces describe past runs, and neither guarantees future behavior;
+- absence of config keys, item IDs, native config, trace data, and raw errors from telemetry and safe errors;
 - endpoint-wide `mcp:use` authority for all six tools, including Thread selection and Matter interview without a separate per-tool grant;
 - redirect denial, body/frame/URL/time/concurrency bounds, cancellation, and permit release; and
 - stable source-free error codes without URLs, credentials, bodies, entity IDs, or state data.
@@ -86,8 +97,10 @@ Before preview acceptance, record separate evidence for:
 | PostgreSQL | Embedded migrations, expiry, one-shot state, replay prevention, refresh rotation, and encrypted signing-key persistence against a disposable database. |
 | Authentik | Discovery, browser login, callback validation, and local token issuance. |
 | Kuri client | DCR, CIMD, loopback authorization, refresh, exact resource binding, and discovery and invocation of all six progressive tools. |
-| Home Assistant | Controlled exposure, bounded REST reads, camera proxy reads, fixed service calls, Thread discovery and selection, and projected Matter registry and node operations for non-sensitive fixtures. |
+| Home Assistant | Controlled exposure, bounded reads, fixed service calls, scene and automation replacement, asynchronous reload behavior, `validate_config`, projected `trace/list`, Thread selection, and projected Matter operations for non-sensitive fixtures. |
 | Container | Multi-architecture build, UID, revision label, private-material inspection, and startup with controlled dependencies. |
 | Preview | Authorized browser login, authenticated `/mcp`, bounded HA, Thread, and Matter operations, telemetry, probes, and secret non-disclosure. |
+
+The authoring and evidence tests must use a disposable Home Assistant instance and its configured administrator token. Record the tested Home Assistant version. Prove that non-admin credentials fail and that excluded APIs remain unreachable. Do not retain native config, full traces, or raw errors as evidence.
 
 Production additionally requires image and stack review, credential and wrapping-key rotation exercises, backup restoration, and recovery objectives. No external evidence is currently claimed.

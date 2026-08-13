@@ -1,10 +1,10 @@
 # Home Assistant Common Controls
 
-`home_assistant_exec` is the entity execution tool. Its MCP annotations are `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, and `openWorldHint: true`. The endpoint-wide `mcp:use` scope authorizes every tool; there is no per-tool OAuth scope.
+`home_assistant_exec` contains entity controls plus scene and automation upserts. Its MCP annotations are `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, and `openWorldHint: true`. The endpoint-wide `mcp:use` scope authorizes every tool; there is no per-tool OAuth scope. The [authoring and evidence contract](spec/authoring-evidence.md) defines the upserts and their deliberate exposure exception.
 
 ## Actions
 
-Every action requires exactly one `entity_id` in the matching domain. Only the listed additional input is accepted.
+Every action in this catalog requires exactly one `entity_id` in the matching domain. Only the listed additional input is accepted.
 
 | Action | Additional input | Fixed POST endpoint |
 | --- | --- | --- |
@@ -36,7 +36,7 @@ Unknown fields, invalid values, and a domain mismatch fail validation. Batching 
 
 ## Authorization And Routing
 
-Every invocation performs a fresh `homeassistant/expose_entity/list` lookup. The exact target must have `conversation: true` before any mutation. The service then maps the selected action server-side to fixed `POST /api/services/{domain}/{service}` routing and constructs a bounded JSON body from only the validated entity ID and listed value. Callers cannot provide a service, domain, path, method, headers, origin, or arbitrary service data.
+Every common-control invocation performs a fresh `homeassistant/expose_entity/list` lookup. The exact target must have `conversation: true` before any mutation. The service then maps the selected action server-side to fixed `POST /api/services/{domain}/{service}` routing and constructs a bounded JSON body from only the validated entity ID and listed value. Callers cannot provide a service, domain, path, method, headers, origin, or arbitrary service data.
 
 The server reads and discards bounded upstream results and returns a minimal result rather than Home Assistant state, context, or service-response data. The shared admission, deadline, size, privacy, and error contracts are defined in [the shared contract](spec/common.md) and [Exposure and Data Safety](../architecture/exposure-data-safety.md).
 

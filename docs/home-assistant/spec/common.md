@@ -1,10 +1,10 @@
 # Home Assistant Shared Contract
 
-The tool names are `home_assistant_query`, `home_assistant_exec`, `thread_query`, `thread_exec`, `matter_query`, and `matter_exec`. Generated progressive help and schemas own action discovery. The entity execution tool follows the [common-control contract](../common-controls.md). Thread and Matter tools follow their [canonical feature contract](thread-matter.md). Every external input rejects unknown fields; semantic validation completes before concurrency admission or network contact.
+The tool names are `home_assistant_query`, `home_assistant_exec`, `thread_query`, `thread_exec`, `matter_query`, and `matter_exec`. Generated progressive help and schemas own action discovery. Entity controls follow the [common-control contract](../common-controls.md). Scene and automation actions follow the [authoring and evidence contract](authoring-evidence.md). Thread and Matter tools follow their [canonical feature contract](thread-matter.md). Every outer input wrapper rejects unknown fields; semantic validation completes before concurrency admission or network contact.
 
 One invocation acquires one of four non-waiting permits and has a 20-second end-to-end deadline. The deadline covers WebSocket authentication and commands, exposure authorization, REST response reading, validation, and output construction. URLs are limited to 8 KiB, REST bodies to 4 MiB, and WebSocket messages and frames to 1 MiB. Normalized JSON output remains limited to 2 MiB, and history output remains limited to 2,000 state points. The [camera snapshot contract](camera-snapshot.md) owns its image and transport limits.
 
-The server uses a fixed origin and credential. It disables REST redirects and environment proxies and never returns upstream wrappers or error bodies. Execution actions read and discard bounded upstream results and return only a minimal result.
+The server uses a fixed origin and credential. It disables REST redirects and environment proxies and never returns upstream wrappers or error bodies. Execution actions read and discard bounded upstream results and return only a minimal result. Trace queries return only the projection defined in the authoring and evidence contract.
 
 Successful query results return the complete normalized object as serialized JSON text and as the same object in `structuredContent`. Progressive filters keep text and structured content synchronized. Camera results retain their specialized image response, and execution actions retain their minimal acknowledgment response.
 

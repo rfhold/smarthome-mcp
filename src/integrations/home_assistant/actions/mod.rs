@@ -1,3 +1,4 @@
+mod authoring;
 mod camera_snapshot;
 mod controls;
 mod get_history;
@@ -7,6 +8,7 @@ mod list_entities;
 mod matter;
 mod thread;
 
+pub use authoring::{AutomationTracesInput, AutomationValidateInput, ConfigUpsertInput};
 pub use camera_snapshot::CameraSnapshotInput;
 pub use controls::{
     ClimateTemperatureInput, CoverPositionInput, EntityControlInput, FanPercentageInput,
@@ -21,6 +23,7 @@ pub use thread::{
     DiscoverRoutersInput, SetPreferredDatasetInput, SetPreferredRouterInput, ThreadEmptyInput,
 };
 
+pub(crate) use authoring::{AutomationTracesQuery, AutomationValidation, ConfigUpsert};
 pub(crate) use camera_snapshot::CameraSnapshotQuery;
 pub(crate) use controls::{Control, ControlAction};
 pub(crate) use get_history::HistoryQuery;

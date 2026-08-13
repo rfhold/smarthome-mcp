@@ -28,6 +28,8 @@ Tests cover:
 - deployment environment and downward API wiring; and
 - declared Alloy and Pyroscope egress ports.
 
+Required authoring and evidence coverage must prove fixed action labels. It must also prove that config keys, item IDs, native config, trace fields, and raw errors remain absent.
+
 ## Post-Deployment Evidence
 
 After an authorized deployment, record timestamps and redacted results for each area:
@@ -42,7 +44,7 @@ After an authorized deployment, record timestamps and redacted results for each 
 | MCP metrics | Generic request count, duration, in-flight, and bounded protocol outcomes. |
 | Home Assistant metrics | Request count, duration, in-flight, fixed action labels, and bounded outcomes without entity dimensions. |
 | Profiles | A 100 Hz CPU profile appears with only approved stable tags. |
-| Failure safety | Controlled failures contain no token, URL, entity ID, friendly name, state, attribute, camera image or Base64, path, MIME value, header, upstream body, or raw error. |
+| Failure safety | Controlled failures contain no token, URL, entity ID, config key, automation item ID, friendly name, state, attribute, native config, trace field, camera image or Base64, path, MIME value, header, upstream body, or raw error. |
 | Export outage | HTTP remains available while backend freshness and collector health expose delivery failure. |
 | Shutdown | Bounded profile and OpenTelemetry shutdown completes with sanitized status only. |
 
