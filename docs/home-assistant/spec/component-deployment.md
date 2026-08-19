@@ -16,7 +16,7 @@ The Boolean must be exactly `true`; unknown fields, strings, and false values fa
 
 ## Fixed Authority
 
-The caller cannot select a host, port, username, config root, path, repository, version, bytes, SSH command, or credential. The preview declaration fixes `172.16.1.10:2200`, user `root`, and config root `/config`. Component files are exact compile-time bytes from `custom_components/smarthome_mcp/`; their manifest version must equal the MCP package version, currently `0.2.0`.
+The caller cannot select a host, port, username, config root, path, repository, version, bytes, SSH command, or credential. The preview declaration fixes `172.16.1.10:2200`, user `root`, and config root `/homeassistant`. This canonical physical directory avoids trusting the `/config` symlink while preserving the deployer's symlink rejection. Component files are exact compile-time bytes from `custom_components/smarthome_mcp/`; their manifest version must equal the MCP package version, currently `0.2.0`.
 
 The native Rust client accepts only an independently seeded Ed25519 host public key, compares it before password authentication, and then requests only the SFTP subsystem. It does not use a shell, TOFU, an SSH agent, ambient SSH configuration, caller input, or a generic filesystem interface.
 
@@ -24,7 +24,7 @@ Endpoint-wide `mcp:use` authorizes this fixed machine-filesystem mutation. It ha
 
 ## Reconciliation
 
-The deployer inspects only bounded regular files and directories under `/config/custom_components/smarthome_mcp` and `/config/.smarthome_mcp-deploy`. Implementation-managed directories must use mode `0755`, component files mode `0644`, and lock, claim, and journal files mode `0600`. It rejects symlinks, special nodes, invalid names, unexpected modes, excessive depth, entries, file size, or total size.
+The deployer inspects only bounded regular files and directories under `/homeassistant/custom_components/smarthome_mcp` and `/homeassistant/.smarthome_mcp-deploy`. Implementation-managed directories must use mode `0755`, component files mode `0644`, and lock, claim, and journal files mode `0600`. It rejects symlinks, special nodes, invalid names, unexpected modes, excessive depth, entries, file size, or total size.
 
 | Existing state | Result |
 | --- | --- |

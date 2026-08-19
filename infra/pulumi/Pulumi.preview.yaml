@@ -8,7 +8,7 @@ config:
   smarthome-mcp:homeAssistantSshHost: 172.16.1.10
   smarthome-mcp:homeAssistantSshPort: "2200"
   smarthome-mcp:homeAssistantSshUsername: root
-  smarthome-mcp:homeAssistantSshConfigRoot: /config
+  smarthome-mcp:homeAssistantSshConfigRoot: /homeassistant
   smarthome-mcp:homeAssistantSshEgressCidr: 172.16.1.10/32
   smarthome-mcp:protectData: "false"
   smarthome-mcp:storageClass: shared-fs
@@ -25,5 +25,4 @@ config:
     - https://preview-kuri.holdenitdown.net
   smarthome-mcp:mcpOAuthWrappingKeyVersions: [v1]
   smarthome-mcp:mcpOAuthActiveWrappingKeyVersion: v1
-  smarthome-mcp:image: cr.holdenitdown.net/rfhold/smarthome-mcp@sha256:b3b34fd1dd5c337b70caa5d3317e96dc698f4c4a8a1e7db7e8b5f094171a2fa1
 encryptionsalt: v1:JpursO2VfUY=:v1:b36ZTkbO7H7FZE0d:kQRTPgYHEdvYZTV5kFmLRAlYatccPg==

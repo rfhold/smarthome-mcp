@@ -39,7 +39,7 @@ before(async () => {
     "smarthome-mcp:homeAssistantSshHost": "172.16.1.10",
     "smarthome-mcp:homeAssistantSshPort": "2200",
     "smarthome-mcp:homeAssistantSshUsername": "root",
-    "smarthome-mcp:homeAssistantSshConfigRoot": "/config",
+    "smarthome-mcp:homeAssistantSshConfigRoot": "/homeassistant",
     "smarthome-mcp:homeAssistantSshEgressCidr": "172.16.1.10/32",
     "smarthome-mcp:protectData": "true",
     "smarthome-mcp:storageClass": "test-storage",
@@ -188,7 +188,7 @@ describe("configuration policy", () => {
     );
     assert.match(
       preview,
-      /^\s*smarthome-mcp:homeAssistantSshConfigRoot: \/config$/m,
+      /^\s*smarthome-mcp:homeAssistantSshConfigRoot: \/homeassistant$/m,
     );
     assert.match(
       preview,
@@ -388,7 +388,10 @@ describe("standalone resource topology", () => {
     assert.equal(app.SMARTHOME_MCP_HOME_ASSISTANT_SSH_HOST, "172.16.1.10");
     assert.equal(app.SMARTHOME_MCP_HOME_ASSISTANT_SSH_PORT, "2200");
     assert.equal(app.SMARTHOME_MCP_HOME_ASSISTANT_SSH_USERNAME, "root");
-    assert.equal(app.SMARTHOME_MCP_HOME_ASSISTANT_SSH_CONFIG_ROOT, "/config");
+    assert.equal(
+      app.SMARTHOME_MCP_HOME_ASSISTANT_SSH_CONFIG_ROOT,
+      "/homeassistant",
+    );
     assert.equal(
       app.SMARTHOME_MCP_HOME_ASSISTANT_SSH_PASSWORD_FILE,
       "/var/run/secrets/smarthome-mcp/home-assistant-ssh/password",

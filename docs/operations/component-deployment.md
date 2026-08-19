@@ -6,7 +6,7 @@ The implementation, local tests, Pulumi declarations, and embedded-source checks
 
 ## Prerequisites
 
-Preview is declared with the exact target `172.16.1.10:2200`, user `root`, config root `/config`, and egress CIDR `172.16.1.10/32`. The target must provide SFTP over SSH, permit that account to inspect and replace the bounded component and transaction directories, and support same-filesystem rename semantics.
+Preview is declared with the exact target `172.16.1.10:2200`, user `root`, config root `/homeassistant`, and egress CIDR `172.16.1.10/32`. `/homeassistant` is the canonical physical directory, selected so the deployer does not trust the `/config` symlink and can preserve symlink rejection at the trust root. The target must provide SFTP over SSH, permit that account to inspect and replace the bounded component and transaction directories, and support same-filesystem rename semantics.
 
 Obtain the Ed25519 host public key through an independent trusted channel before deployment. Do not learn or accept it from the deployment connection. The password must not contain control characters, and the public-key file must contain an `ssh-ed25519` key in the accepted public-key format.
 
