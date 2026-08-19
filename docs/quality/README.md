@@ -4,5 +4,5 @@ This domain records verified local runtime and foundation checks. It separates l
 
 | Document | Covers |
 | --- | --- |
-| [Testing](testing.md) | Verified commands, current coverage, remaining contract tests, and release evidence. |
+| [Testing](testing.md) | Verified local commands, feature checks, compatibility evidence, and embedded component gates. |
 | [Observability testing](observability-testing.md) | Local telemetry coverage and required post-deployment evidence. |

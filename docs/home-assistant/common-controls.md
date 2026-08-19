@@ -1,10 +1,10 @@
 # Home Assistant Common Controls
 
-`home_assistant_exec` contains entity controls plus scene and automation upserts. Its MCP annotations are `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, and `openWorldHint: true`. The endpoint-wide `mcp:use` scope authorizes every tool; there is no per-tool OAuth scope. The [authoring and evidence contract](spec/authoring-evidence.md) defines the upserts and their deliberate exposure exception.
+`home_assistant_exec` contains entity controls, scene and automation upserts, blueprint operations, component deployment, setup, and restart. Its MCP annotations are `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, and `openWorldHint: true`. The endpoint-wide `mcp:use` scope authorizes every tool; there is no per-tool OAuth scope. The [authoring and evidence contract](spec/authoring-evidence.md) defines upserts. The [blueprint contract](spec/blueprints.md) defines blueprint and lifecycle actions. The [component deployment contract](spec/component-deployment.md) defines fixed private filesystem replacement.
 
 ## Actions
 
-Every action in this catalog requires exactly one `entity_id` in the matching domain. Only the listed additional input is accepted.
+Every common-control action in this catalog requires exactly one `entity_id` in the matching domain. Only the listed additional input is accepted. Non-entity actions are defined by their linked feature contracts.
 
 | Action | Additional input | Fixed POST endpoint |
 | --- | --- | --- |

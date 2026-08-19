@@ -5,6 +5,7 @@ mod get_history;
 mod get_states;
 mod list_devices;
 mod list_entities;
+mod management;
 mod matter;
 mod thread;
 
@@ -21,6 +22,10 @@ pub use get_history::GetHistoryInput;
 pub use get_states::GetStatesInput;
 pub use list_devices::ListDevicesInput;
 pub use list_entities::ListEntitiesInput;
+pub use management::{
+    AutomationFromBlueprintInput, BlueprintGetInput, BlueprintListInput, BlueprintSaveInput,
+    ConfirmInput, EmptyInput,
+};
 pub use matter::{ListMatterDevicesInput, MatterDeviceInput, MatterEmptyInput};
 pub use thread::{
     DiscoverRoutersInput, SetPreferredDatasetInput, SetPreferredRouterInput, ThreadEmptyInput,
@@ -36,6 +41,9 @@ pub(crate) use get_history::HistoryQuery;
 pub(crate) use get_states::StatesQuery;
 pub(crate) use list_devices::DevicesQuery;
 pub(crate) use list_entities::EntitiesQuery;
+pub(crate) use management::{
+    AutomationFromBlueprint, BlueprintListQuery, BlueprintPath, BlueprintSave,
+};
 pub(crate) use matter::{MatterDeviceQuery, MatterDevicesQuery};
 pub(crate) use thread::{PreferredDatasetCommand, PreferredRouterCommand, RouterDiscoveryQuery};
 

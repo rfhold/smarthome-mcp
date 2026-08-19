@@ -1,6 +1,6 @@
 #![allow(clippy::useless_vec)]
 
-use std::sync::Arc;
+use std::{future::Future, pin::Pin, sync::Arc};
 
 use axum::Router;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -16,14 +16,15 @@ use serde_json::json;
 use crate::{
     config::OAuthConfig,
     integrations::home_assistant::{
-        Error as HomeAssistantError,
+        DeployInput, Error as HomeAssistantError,
         actions::{
-            AutomationTracesInput, AutomationValidateInput, CameraSnapshotInput,
-            ClimateTemperatureInput, ConfigGetInput, ConfigListInput, ConfigUpsertInput, Control,
-            ControlAction, CoverPositionInput, DiscoverRoutersInput, EntityControlInput,
-            FanPercentageInput, GetHistoryInput, GetStatesInput, LightTurnOnInput,
-            ListDevicesInput, ListEntitiesInput, ListMatterDevicesInput, MatterDeviceInput,
-            MatterEmptyInput, MediaPlayerVolumeInput, SetPreferredDatasetInput,
+            AutomationFromBlueprintInput, AutomationTracesInput, AutomationValidateInput,
+            BlueprintGetInput, BlueprintListInput, BlueprintSaveInput, CameraSnapshotInput,
+            ClimateTemperatureInput, ConfigGetInput, ConfigListInput, ConfigUpsertInput,
+            ConfirmInput, Control, ControlAction, CoverPositionInput, DiscoverRoutersInput,
+            EmptyInput, EntityControlInput, FanPercentageInput, GetHistoryInput, GetStatesInput,
+            LightTurnOnInput, ListDevicesInput, ListEntitiesInput, ListMatterDevicesInput,
+            MatterDeviceInput, MatterEmptyInput, MediaPlayerVolumeInput, SetPreferredDatasetInput,
             SetPreferredRouterInput, ThreadEmptyInput,
         },
     },
@@ -73,7 +74,7 @@ pub fn router(
 
 #[mcp::progressive_server(
     name = "smarthome-mcp",
-    version = "0.1.0",
+    version = "0.2.0",
     description = "Authenticated, policy-bounded smart-home tools.",
     tool(
         name = "home_assistant_query",
@@ -90,11 +91,12 @@ pub fn router(
         namespace(history, description = "Query Home Assistant state history."),
         namespace(camera, description = "Read Home Assistant camera frames."),
         namespace(automation, description = "Read stored automations, validate sections, and summarize traces."),
+        namespace(blueprint, description = "Read bounded automation blueprints."),
         namespace(scene, description = "Read stored Home Assistant scenes.")
     ),
     tool(
         name = "home_assistant_exec",
-        description = "Operate Assist-exposed entities and upsert bounded native scene or automation configs.",
+        description = "Operate Assist-exposed entities, manage bounded native configs, and deploy the embedded smarthome_mcp integration.",
         annotations = json!({
             "readOnlyHint": false,
             "destructiveHint": true,
@@ -102,7 +104,10 @@ pub fn router(
             "openWorldHint": true
         }),
         namespace(scene, description = "Activate or upsert Home Assistant scenes."),
-        namespace(automation, description = "Upsert Home Assistant automations."),
+        namespace(automation, description = "Upsert Home Assistant automations or create one from a blueprint."),
+        namespace(blueprint, description = "Save automation blueprints."),
+        namespace(smarthome_mcp, description = "Deploy or set up the smarthome_mcp integration."),
+        namespace(home_assistant, description = "Run separately confirmed Home Assistant lifecycle operations."),
         namespace(light, description = "Control Home Assistant lights."),
         namespace(switch, description = "Control Home Assistant switches."),
         namespace(fan, description = "Control Home Assistant fans."),
@@ -161,6 +166,164 @@ pub fn router(
     )
 )]
 impl SmarthomeMcp {
+    /// List bounded automation blueprint metadata and input definitions.
+    #[action(tool = "home_assistant_query", name = "blueprint.list")]
+    async fn list_blueprints(
+        &self,
+        input: BlueprintListInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        dispatch_query(
+            self.services
+                .home_assistant
+                .list_blueprints(&match input.validate() {
+                    Ok(v) => v,
+                    Err(()) => {
+                        return Ok(tool_error(
+                            "list blueprints",
+                            HomeAssistantError::InvalidArguments,
+                        ));
+                    }
+                }),
+            "list blueprints",
+            context,
+        )
+        .await
+    }
+
+    /// Get bounded semantic YAML for one automation blueprint.
+    #[action(tool = "home_assistant_query", name = "blueprint.get")]
+    async fn get_blueprint(
+        &self,
+        input: BlueprintGetInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        dispatch_query(
+            self.services
+                .home_assistant
+                .get_blueprint(&match input.validate() {
+                    Ok(v) => v,
+                    Err(()) => {
+                        return Ok(tool_error(
+                            "get blueprint",
+                            HomeAssistantError::InvalidArguments,
+                        ));
+                    }
+                }),
+            "get blueprint",
+            context,
+        )
+        .await
+    }
+
+    /// Replace one automation blueprint with bounded semantic YAML.
+    #[action(tool = "home_assistant_exec", name = "blueprint.save")]
+    async fn save_blueprint(
+        &self,
+        input: BlueprintSaveInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        dispatch_exec(
+            self.services
+                .home_assistant
+                .save_blueprint(&match input.validate() {
+                    Ok(v) => v,
+                    Err(()) => {
+                        return Ok(tool_error(
+                            "save blueprint",
+                            HomeAssistantError::InvalidArguments,
+                        ));
+                    }
+                }),
+            "save blueprint",
+            context,
+        )
+        .await
+    }
+
+    /// Preflight blueprint substitution, then create a compact automation.
+    #[action(tool = "home_assistant_exec", name = "automation.from_blueprint")]
+    async fn automation_from_blueprint(
+        &self,
+        input: AutomationFromBlueprintInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        dispatch_exec(
+            self.services
+                .home_assistant
+                .automation_from_blueprint(&match input.validate() {
+                    Ok(v) => v,
+                    Err(()) => {
+                        return Ok(tool_error(
+                            "create automation from blueprint",
+                            HomeAssistantError::InvalidArguments,
+                        ));
+                    }
+                }),
+            "create automation from blueprint",
+            context,
+        )
+        .await
+    }
+
+    /// Start only the smarthome_mcp integration config flow when needed.
+    #[action(tool = "home_assistant_exec", name = "smarthome_mcp.setup")]
+    async fn setup_smarthome_mcp(
+        &self,
+        _: EmptyInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        dispatch_exec(
+            self.services.home_assistant.setup_smarthome_mcp(),
+            "set up smarthome_mcp",
+            context,
+        )
+        .await
+    }
+
+    /// Deploy the embedded smarthome_mcp integration after exact confirmation.
+    #[action(tool = "home_assistant_exec", name = "smarthome_mcp.deploy")]
+    async fn deploy_smarthome_mcp(
+        &self,
+        input: DeployInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        if let Err(error) = input.validate() {
+            return Ok(error.into_tool_error().into_mcp_result());
+        }
+        let result = tokio::select! {
+            result = self.services.component_deployer.deploy() => result,
+            () = context.cancelled() => return Err(ServerError::internal("request cancelled")),
+        };
+        match result {
+            Ok(output) => Ok(control_result(
+                serde_json::to_value(output).expect("deploy output is serializable"),
+            )),
+            Err(error) => Ok(error.into_tool_error().into_mcp_result()),
+        }
+    }
+
+    /// Restart Home Assistant only after exact boolean confirmation.
+    #[action(tool = "home_assistant_exec", name = "home_assistant.restart")]
+    async fn restart_home_assistant(
+        &self,
+        input: ConfirmInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        if input.validate().is_err() {
+            return Ok(tool_error(
+                "restart Home Assistant",
+                HomeAssistantError::InvalidArguments,
+            ));
+        }
+        dispatch_exec(
+            self.services.home_assistant.restart_home_assistant(),
+            "restart Home Assistant",
+            context,
+        )
+        .await
+    }
+
     /// List editor-managed scenes using bounded state metadata. YAML-only scenes
     /// without a safe stored config ID are not included.
     #[action(tool = "home_assistant_query", name = "scene.list")]
@@ -1120,6 +1283,34 @@ async fn execute_control(
     }
 }
 
+fn dispatch_query<'a>(
+    future: impl Future<Output = Result<serde_json::Value, HomeAssistantError>> + Send + 'a,
+    description: &'static str,
+    context: ServerContext,
+) -> Pin<Box<dyn Future<Output = ServerResult<McpToolResult>> + Send + 'a>> {
+    Box::pin(async move {
+        let result = tokio::select! { result = future => result, () = context.cancelled() => return Err(ServerError::internal("request cancelled")) };
+        match result {
+            Ok(output) => query_result(output),
+            Err(error) => Ok(tool_error(description, error)),
+        }
+    })
+}
+
+fn dispatch_exec<'a>(
+    future: impl Future<Output = Result<serde_json::Value, HomeAssistantError>> + Send + 'a,
+    description: &'static str,
+    context: ServerContext,
+) -> Pin<Box<dyn Future<Output = ServerResult<McpToolResult>> + Send + 'a>> {
+    Box::pin(async move {
+        let result = tokio::select! { result = future => result, () = context.cancelled() => return Err(ServerError::internal("request cancelled")) };
+        match result {
+            Ok(output) => Ok(control_result(output)),
+            Err(error) => Ok(tool_error(description, error)),
+        }
+    })
+}
+
 fn control_result(output: serde_json::Value) -> McpToolResult {
     let action = output["action"].as_str().unwrap_or("control");
     McpToolResult::new(json!({
@@ -1173,7 +1364,10 @@ mod tests {
     use tracing::instrument::WithSubscriber as _;
     use tracing_subscriber::layer::SubscriberExt as _;
 
-    use crate::{config::Secret, integrations::home_assistant::HomeAssistantClient};
+    use crate::{
+        config::Secret,
+        integrations::home_assistant::{ComponentDeployer, HomeAssistantClient},
+    };
 
     use super::*;
 
@@ -1247,6 +1441,24 @@ mod tests {
         );
         let handler = Arc::new(SmarthomeMcp {
             services: Arc::new(Services::new(client)),
+        });
+        let (origin, task) = serve(mcp::server::streamable_http_router(handler)).await;
+        (format!("{origin}/mcp"), task)
+    }
+
+    async fn endpoint_with_component_deployer(
+        component_deployer: ComponentDeployer,
+    ) -> (String, JoinHandle<()>) {
+        let client = HomeAssistantClient::for_test(
+            url::Url::parse("http://127.0.0.1:1/").unwrap(),
+            Secret("test-token".to_owned()),
+            Duration::from_millis(100),
+        );
+        let handler = Arc::new(SmarthomeMcp {
+            services: Arc::new(Services::new_with_component_deployer(
+                client,
+                component_deployer,
+            )),
         });
         let (origin, task) = serve(mcp::server::streamable_http_router(handler)).await;
         (format!("{origin}/mcp"), task)
@@ -1391,6 +1603,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn discovery_reports_the_cargo_package_version() {
+        let (endpoint, task) = endpoint().await;
+        let (_, response) = post(
+            &endpoint,
+            request("server/discover", "discover-version", json!({})),
+        )
+        .await;
+
+        assert_eq!(
+            response["result"]["_meta"]["io.modelcontextprotocol/serverInfo"]["version"],
+            env!("CARGO_PKG_VERSION")
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn discovery_lists_query_and_exec_with_distinct_annotations() {
         let (endpoint, task) = endpoint().await;
         let (_, response) = post(&endpoint, request("tools/list", "list", json!({}))).await;
@@ -1420,6 +1648,151 @@ mod tests {
             let tool = tools.iter().find(|tool| tool["name"] == name).unwrap();
             assert_eq!(tool["annotations"]["readOnlyHint"], false);
             assert_eq!(tool["annotations"]["destructiveHint"], true);
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn deployment_and_blueprint_catalogs_are_progressive_and_closed() {
+        let (endpoint, task) = endpoint().await;
+        let (_, response) = post(&endpoint, request("tools/list", "list", json!({}))).await;
+        let tools = response["result"]["tools"].as_array().unwrap();
+        let exec = tools
+            .iter()
+            .find(|tool| tool["name"] == EXEC_TOOL_NAME)
+            .unwrap();
+        let exec_schema = serde_json::to_string(&exec["inputSchema"]).unwrap();
+        for action in [
+            "blueprint.save",
+            "automation.from_blueprint",
+            "smarthome_mcp.deploy",
+            "smarthome_mcp.setup",
+            "home_assistant.restart",
+        ] {
+            assert!(exec_schema.contains(action));
+        }
+        let query = tools.iter().find(|tool| tool["name"] == TOOL_NAME).unwrap();
+        let query_schema = serde_json::to_string(&query["inputSchema"]).unwrap();
+        assert!(query_schema.contains("blueprint.list"));
+        assert!(query_schema.contains("blueprint.get"));
+        assert!(exec_schema.contains("\"const\":true"));
+
+        for (tool, help, action) in [
+            (TOOL_NAME, "help.blueprint", "blueprint.list"),
+            (EXEC_TOOL_NAME, "help.smarthome_mcp", "smarthome_mcp.deploy"),
+            (
+                EXEC_TOOL_NAME,
+                "help.home_assistant",
+                "home_assistant.restart",
+            ),
+        ] {
+            let (_, response) = post(
+                &endpoint,
+                request(
+                    "tools/call",
+                    help,
+                    json!({"name":tool,"arguments":{"action":help}}),
+                ),
+            )
+            .await;
+            assert!(
+                response["result"]["structuredContent"]["actions"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|entry| entry["action"] == action)
+            );
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn confirmations_reject_false_without_upstream_contact() {
+        let (endpoint, task) = endpoint().await;
+        for (tool, action, input) in [
+            (
+                EXEC_TOOL_NAME,
+                "home_assistant.restart",
+                json!({"confirm":false}),
+            ),
+            (
+                EXEC_TOOL_NAME,
+                "smarthome_mcp.deploy",
+                json!({"confirm":false}),
+            ),
+        ] {
+            let (_, response) = post(
+                &endpoint,
+                request(
+                    "tools/call",
+                    action,
+                    json!({"name":tool,"arguments":{"action":action,"input":input}}),
+                ),
+            )
+            .await;
+            assert_eq!(
+                response["result"]["structuredContent"]["error"]["code"],
+                "invalid_arguments"
+            );
+        }
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn confirmed_deploy_dispatches_once_and_returns_only_the_safe_projection() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let (endpoint, task) =
+            endpoint_with_component_deployer(ComponentDeployer::successful_for_test(calls.clone()))
+                .await;
+
+        let (_, rejected) = post(
+            &endpoint,
+            request(
+                "tools/call",
+                "deploy-false",
+                json!({
+                    "name":EXEC_TOOL_NAME,
+                    "arguments":{"action":"smarthome_mcp.deploy","input":{"confirm":false}}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(
+            rejected["result"]["structuredContent"]["error"]["code"],
+            "invalid_arguments"
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+        let (_, response) = post(
+            &endpoint,
+            request(
+                "tools/call",
+                "deploy-true",
+                json!({
+                    "name":EXEC_TOOL_NAME,
+                    "arguments":{"action":"smarthome_mcp.deploy","input":{"confirm":true}}
+                }),
+            ),
+        )
+        .await;
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            response["result"]["structuredContent"],
+            json!({
+                "action":"smarthome_mcp.deploy",
+                "operation":"install",
+                "changed":true,
+                "installed_version":env!("CARGO_PKG_VERSION"),
+                "restart_required":true
+            })
+        );
+        assert_eq!(
+            response["result"]["content"][0]["text"],
+            "Completed smarthome_mcp.deploy."
+        );
+        let serialized = serde_json::to_string(&response).unwrap();
+        for private in ["127.0.0.1", "/config", "password", "ssh-ed25519"] {
+            assert!(!serialized.contains(private));
         }
         task.abort();
     }
@@ -1873,7 +2246,7 @@ mod tests {
         ] {
             assert!(serialized.contains(action), "missing {action}");
         }
-        assert_eq!(serialized.matches("additionalProperties").count(), 26);
+        assert_eq!(serialized.matches("additionalProperties").count(), 31);
         assert!(serialized.contains("\"additionalProperties\":false"));
         for forbidden in ["toggle", "confirmation", "preset", "source", "template"] {
             assert!(!serialized.contains(forbidden));
@@ -2134,6 +2507,29 @@ mod tests {
             assert_eq!(serde_json::from_str::<Value>(text).unwrap(), output);
             assert_eq!(result.raw["structuredContent"], output);
         }
+    }
+
+    #[test]
+    fn deploy_result_contains_only_the_bounded_projection() {
+        let output = json!({
+            "action":"smarthome_mcp.deploy",
+            "operation":"install",
+            "changed":true,
+            "installed_version":"0.2.0",
+            "restart_required":true,
+        });
+        let result = control_result(output.clone());
+        assert_eq!(result.raw["structuredContent"], output);
+        assert_eq!(
+            result.raw["content"][0]["text"],
+            "Completed smarthome_mcp.deploy."
+        );
+        assert!(
+            !result.raw["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("/config")
+        );
     }
 
     #[tokio::test]

@@ -1,6 +1,6 @@
 # Home Assistant Authoring and Evidence Contract
 
-This contract defines eight narrow actions within the six progressive tools. They add authoring, stored-config reads, and projected evidence without generic Home Assistant access.
+This contract defines eight narrow authoring and evidence actions within the six progressive tools. They add authoring, stored-config reads, and projected evidence without generic Home Assistant access. The [blueprint contract](blueprints.md) defines separate implemented actions.
 
 ## Action Catalog
 

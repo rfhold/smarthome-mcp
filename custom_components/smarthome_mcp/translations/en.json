@@ -1,0 +1,8 @@
+{
+  "title": "Smarthome MCP",
+  "config": {
+    "abort": {
+      "already_configured": "Smarthome MCP is already configured."
+    }
+  }
+}

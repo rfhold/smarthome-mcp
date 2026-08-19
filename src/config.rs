@@ -78,6 +78,17 @@ pub struct IntegrationsConfig {
 pub struct HomeAssistantConfig {
     pub origin: Url,
     pub token: Secret,
+    pub ssh: HomeAssistantSshConfig,
+}
+
+#[derive(Clone)]
+pub struct HomeAssistantSshConfig {
+    pub host: String,
+    pub port: u16,
+    pub username: String,
+    pub config_root: String,
+    pub password_file: String,
+    pub host_public_key_file: String,
 }
 
 #[derive(Clone)]
@@ -142,6 +153,7 @@ impl Config {
                         boolean("HOME_ASSISTANT_ALLOW_INSECURE_HTTP")?,
                     )?,
                     token: secret("HOME_ASSISTANT_TOKEN")?,
+                    ssh: home_assistant_ssh_config()?,
                 },
             },
         };
@@ -235,6 +247,56 @@ fn seconds(name: &str) -> Result<Duration, String> {
         .filter(|seconds| *seconds > 0)
         .map(Duration::from_secs)
         .ok_or_else(|| format!("invalid {PREFIX}{name}"))
+}
+
+fn home_assistant_ssh_config() -> Result<HomeAssistantSshConfig, String> {
+    let host = required("HOME_ASSISTANT_SSH_HOST")?;
+    let port = required("HOME_ASSISTANT_SSH_PORT")?
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0)
+        .ok_or_else(|| format!("invalid {PREFIX}HOME_ASSISTANT_SSH_PORT"))?;
+    let username = required("HOME_ASSISTANT_SSH_USERNAME")?;
+    let config_root = required("HOME_ASSISTANT_SSH_CONFIG_ROOT")?;
+    let password_file = required("HOME_ASSISTANT_SSH_PASSWORD_FILE")?;
+    let host_public_key_file = required("HOME_ASSISTANT_SSH_HOST_PUBLIC_KEY_FILE")?;
+    if !valid_ssh_atom(&host)
+        || !valid_ssh_atom(&username)
+        || !valid_absolute_path(&config_root)
+        || !valid_absolute_path(&password_file)
+        || !valid_absolute_path(&host_public_key_file)
+    {
+        return Err("invalid Home Assistant SSH configuration".to_owned());
+    }
+    Ok(HomeAssistantSshConfig {
+        host,
+        port,
+        username,
+        config_root,
+        password_file,
+        host_public_key_file,
+    })
+}
+
+fn valid_ssh_atom(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b':' | b'_' | b'-'))
+}
+
+fn valid_absolute_path(value: &str) -> bool {
+    value.starts_with('/')
+        && value.len() <= 1024
+        && !value.contains("//")
+        && value.split('/').skip(1).all(|part| {
+            !part.is_empty()
+                && !matches!(part, "." | "..")
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        })
 }
 
 fn boolean(name: &str) -> Result<bool, String> {
@@ -434,6 +496,14 @@ mod tests {
                 home_assistant: HomeAssistantConfig {
                     origin: Url::parse("https://home-assistant.example/").unwrap(),
                     token: Secret("secret".to_owned()),
+                    ssh: HomeAssistantSshConfig {
+                        host: "home-assistant.internal".to_owned(),
+                        port: 22,
+                        username: "root".to_owned(),
+                        config_root: "/config".to_owned(),
+                        password_file: "/run/secrets/password".to_owned(),
+                        host_public_key_file: "/run/secrets/host-key".to_owned(),
+                    },
                 },
             },
         };
@@ -449,5 +519,18 @@ mod tests {
             config.validate().unwrap_err(),
             "OAuth policy configuration is invalid"
         );
+    }
+
+    #[test]
+    fn ssh_configuration_values_are_strict_and_server_owned() {
+        for value in ["/config", "/run/secrets/password"] {
+            assert!(valid_absolute_path(value));
+        }
+        for value in ["config", "/config/../secret", "/config//component", "/"] {
+            assert!(!valid_absolute_path(value));
+        }
+        assert!(valid_ssh_atom("172.16.1.10"));
+        assert!(valid_ssh_atom("root"));
+        assert!(!valid_ssh_atom("root user"));
     }
 }

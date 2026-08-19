@@ -2,7 +2,7 @@
 
 The host emits correlated OpenTelemetry traces and metrics, structured JSON logs, and optional CPU profiles. Health and readiness probes intentionally bypass request telemetry.
 
-Home Assistant operations emit `home_assistant.query` spans. Each service-owned Home Assistant REST request emits one child `http.client.request` client span and propagates that span's W3C trace context upstream. The span covers request send and response headers. For an accepted success status, it also covers bounded body transfer and ends before JSON or schema validation. Status and declared-size rejections finalize at headers. A cancellation guard finalizes a dropped request. Home Assistant WebSocket authentication, exposure, and fixed registry commands are outside this client instrumentation boundary.
+Home Assistant operations emit `home_assistant.query` spans. Each service-owned Home Assistant REST request emits one child `http.client.request` client span and propagates that span's W3C trace context upstream. The span covers request send and response headers. For an accepted success status, it also covers bounded body transfer and ends before JSON or schema validation. Status and declared-size rejections finalize at headers. A cancellation guard finalizes a dropped request. Home Assistant WebSocket authentication, exposure, and fixed registry commands are outside this client instrumentation boundary. Blueprint telemetry uses fixed action and outcome labels. Component deployment has separate request, duration, and in-flight metrics with fixed outcomes. Neither records payload-derived dimensions.
 
 The Home Assistant integration emits these metrics:
 

@@ -1,0 +1,11 @@
+{
+  "domain": "smarthome_mcp",
+  "name": "Smarthome MCP",
+  "version": "0.2.0",
+  "config_flow": true,
+  "documentation": "https://git.holdenitdown.net/rfhold/smarthome-mcp/src/branch/main/docs/home-assistant/spec/blueprints.md",
+  "issue_tracker": "https://git.holdenitdown.net/rfhold/smarthome-mcp/issues",
+  "codeowners": ["@rfhold"],
+  "dependencies": ["automation", "blueprint", "websocket_api"],
+  "requirements": []
+}

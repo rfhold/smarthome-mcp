@@ -16,6 +16,7 @@ RUN apt-get update && \
 
 COPY Cargo.toml Cargo.lock ./
 COPY src src
+COPY custom_components/smarthome_mcp custom_components/smarthome_mcp
 
 FROM build-base AS build
 

@@ -1,6 +1,15 @@
 /target/
 /infra/pulumi/node_modules/
 /infra/pulumi/.pulumi/
+/.venv/
+**/__pycache__/
+*.py[cod]
+/.pytest_cache/
+/.mypy_cache/
+/.ruff_cache/
+/.coverage
+/.coverage.*
+/htmlcov/
 /.env
 /.env.*
 !/.env.example

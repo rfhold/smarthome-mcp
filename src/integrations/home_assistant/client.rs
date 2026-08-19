@@ -27,10 +27,11 @@ use crate::{config::Secret, http_client};
 use super::{
     Error,
     actions::{
-        AutomationTracesQuery, AutomationValidation, CameraSnapshotQuery, ConfigGetQuery,
-        ConfigListQuery, ConfigUpsert, Control, DevicesQuery, EntitiesQuery, HistoryQuery,
-        MatterDeviceQuery, MatterDevicesQuery, PreferredDatasetCommand, PreferredRouterCommand,
-        RouterDiscoveryQuery, StatesQuery, valid_config_key, valid_entity_id, validate_native_json,
+        AutomationFromBlueprint, AutomationTracesQuery, AutomationValidation, BlueprintListQuery,
+        BlueprintPath, BlueprintSave, CameraSnapshotQuery, ConfigGetQuery, ConfigListQuery,
+        ConfigUpsert, Control, DevicesQuery, EntitiesQuery, HistoryQuery, MatterDeviceQuery,
+        MatterDevicesQuery, PreferredDatasetCommand, PreferredRouterCommand, RouterDiscoveryQuery,
+        StatesQuery, valid_config_key, valid_entity_id, validate_native_json,
     },
     telemetry::{MetricsGuard, request_outcome},
 };
@@ -62,6 +63,10 @@ const MATTER_PING_NODE: &str = "matter/ping_node";
 const MATTER_INTERVIEW_NODE: &str = "matter/interview_node";
 const AUTOMATION_VALIDATE: &str = "validate_config";
 const AUTOMATION_TRACE_LIST: &str = "trace/list";
+const BLUEPRINT_LIST: &str = "blueprint/list";
+const BLUEPRINT_GET: &str = "smarthome_mcp/blueprint/get";
+const BLUEPRINT_SAVE: &str = "blueprint/save";
+const BLUEPRINT_SUBSTITUTE: &str = "blueprint/substitute";
 
 type HomeAssistantSocket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -249,6 +254,16 @@ struct StoredConfigEntry {
     config_key: String,
     entity_id: String,
     name: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BlueprintSummary {
+    path: String,
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input: Option<Value>,
 }
 
 pub(crate) struct CameraSnapshot {
@@ -940,6 +955,134 @@ impl HomeAssistantClient {
         result
     }
 
+    pub(crate) async fn list_blueprints(&self, query: &BlueprintListQuery) -> Result<Value, Error> {
+        let raw = self
+            .fixed_websocket_query(
+                "blueprint.list",
+                json!({"id":1,"type":BLUEPRINT_LIST,"domain":"automation"}),
+            )
+            .await?;
+        let object = raw.as_object().ok_or(Error::InvalidResponse)?;
+        if object.len() > 1_000 {
+            return Err(Error::ResponseTooLarge);
+        }
+        let mut entries = object
+            .iter()
+            .filter_map(|(path, value)| normalize_blueprint(path, value).ok().flatten())
+            .collect::<Vec<_>>();
+        entries.retain(|entry| {
+            query.search.as_ref().is_none_or(|needle| {
+                case_fold(&entry.path).contains(needle)
+                    || case_fold(&entry.name).contains(needle)
+                    || entry
+                        .description
+                        .as_ref()
+                        .is_some_and(|value| case_fold(value).contains(needle))
+            })
+        });
+        entries.sort_by(|left, right| {
+            case_fold(&left.name)
+                .cmp(&case_fold(&right.name))
+                .then_with(|| left.path.cmp(&right.path))
+        });
+        let total = entries.len();
+        let truncated = total > query.limit;
+        entries.truncate(query.limit);
+        bounded_output(
+            json!({"action":"blueprint.list","blueprints":entries,"total":total,"truncated":truncated}),
+        )
+    }
+
+    pub(crate) async fn get_blueprint(&self, query: &BlueprintPath) -> Result<Value, Error> {
+        let raw = self
+            .fixed_websocket_query(
+                "blueprint.get",
+                json!({"id":1,"type":BLUEPRINT_GET,"path":query.0}),
+            )
+            .await?;
+        let yaml = raw
+            .get("yaml")
+            .and_then(Value::as_str)
+            .filter(|yaml| !yaml.is_empty() && yaml.len() <= 256 * 1024 && !yaml.contains('\0'))
+            .ok_or(Error::InvalidResponse)?
+            .to_owned();
+        bounded_output(json!({"action":"blueprint.get","path":query.0,"yaml":yaml}))
+    }
+
+    pub(crate) async fn save_blueprint(&self, command: &BlueprintSave) -> Result<Value, Error> {
+        self.fixed_websocket_ack("blueprint.save", json!({"id":1,"type":BLUEPRINT_SAVE,"domain":"automation","path":command.path,"yaml":command.yaml,"allow_override":true}), json!({"action":"blueprint.save","accepted":true})).await
+    }
+
+    pub(crate) async fn automation_from_blueprint(
+        &self,
+        command: &AutomationFromBlueprint,
+    ) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let action = "automation.from_blueprint";
+        let mut metrics = MetricsGuard::new(action);
+        let span = operation_span("home_assistant.exec", action);
+        let result = tokio::time::timeout(self.timeout, async {
+            let mut socket = self.open_websocket().await?;
+            self.websocket_command(&mut socket, 1, json!({"id":1,"type":BLUEPRINT_SUBSTITUTE,"domain":"automation","path":command.path,"input":command.input})).await?;
+            let _ = socket.close(None).await;
+            let mut config = serde_json::Map::new();
+            config.insert("id".into(), json!(command.config_key));
+            if let Some(alias) = &command.alias { config.insert("alias".into(), json!(alias)); }
+            if let Some(description) = &command.description { config.insert("description".into(), json!(description)); }
+            config.insert("use_blueprint".into(), json!({"path":command.path,"input":command.input}));
+            let url = self.endpoint(&["api", "config", "automation", "config", &command.config_key])?;
+            let response: Value = self.post_json_response(url, &Value::Object(config)).await?;
+            if response != json!({"result":"ok"}) { return Err(Error::InvalidResponse); }
+            bounded_output(json!({"action":action,"accepted":true}))
+        }).instrument(span.clone()).await.unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
+    pub(crate) async fn setup_smarthome_mcp(&self) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let action = "smarthome_mcp.setup";
+        let mut metrics = MetricsGuard::new(action);
+        let span = operation_span("home_assistant.exec", action);
+        let result = tokio::time::timeout(self.timeout, async {
+            let mut socket = self.open_websocket().await?;
+            let entries = self.websocket_command(&mut socket, 1, json!({"id":1,"type":"config_entries/get","domain":"smarthome_mcp"})).await?;
+            let _ = socket.close(None).await;
+            let entries = entries.as_array().ok_or(Error::InvalidResponse)?;
+            if entries.len() > 10
+                || entries.iter().any(|entry| {
+                    entry.get("domain").and_then(Value::as_str) != Some("smarthome_mcp")
+                })
+            {
+                return Err(Error::InvalidResponse);
+            }
+            if !entries.is_empty() { return bounded_output(json!({"action":action,"configured":true,"already_configured":true})); }
+            let url = self.endpoint(&["api", "config", "config_entries", "flow"])?;
+            let response: Value = self.post_json_response(url, &json!({"handler":"smarthome_mcp"})).await?;
+            let flow_type = response.get("type").and_then(Value::as_str).ok_or(Error::InvalidResponse)?;
+            if !matches!(flow_type, "create_entry" | "abort") { return Err(Error::InvalidResponse); }
+            let already_configured = flow_type == "abort"
+                && matches!(
+                    response.get("reason").and_then(Value::as_str),
+                    Some("single_instance_allowed" | "already_configured")
+                );
+            if flow_type == "abort" && !already_configured { return Err(Error::RequestRejected); }
+            bounded_output(json!({"action":action,"configured":flow_type == "create_entry" || already_configured,"already_configured":already_configured}))
+        }).instrument(span.clone()).await.unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
+    pub(crate) async fn restart_home_assistant(&self) -> Result<Value, Error> {
+        self.fixed_rest_ack(
+            "home_assistant.restart",
+            &["api", "services", "homeassistant", "restart"],
+            &json!({}),
+            json!({"action":"home_assistant.restart","accepted":true}),
+        )
+        .await
+    }
+
     async fn upsert_config(
         &self,
         action: &'static str,
@@ -1047,6 +1190,49 @@ impl HomeAssistantClient {
             let mut socket = self.open_websocket().await?;
             self.websocket_command(&mut socket, 1, command).await?;
             let _ = socket.close(None).await;
+            bounded_output(output)
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
+    async fn fixed_websocket_query(
+        &self,
+        action: &'static str,
+        command: Value,
+    ) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let mut metrics = MetricsGuard::new(action);
+        let span = operation_span("home_assistant.query", action);
+        let result = tokio::time::timeout(self.timeout, async {
+            let mut socket = self.open_websocket().await?;
+            let output = self.websocket_command(&mut socket, 1, command).await?;
+            let _ = socket.close(None).await;
+            Ok(output)
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
+    async fn fixed_rest_ack(
+        &self,
+        action: &'static str,
+        path: &[&str],
+        body: &Value,
+        output: Value,
+    ) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let mut metrics = MetricsGuard::new(action);
+        let span = operation_span("home_assistant.exec", action);
+        let result = tokio::time::timeout(self.timeout, async {
+            let url = self.endpoint(path)?;
+            self.post_json_acceptance(url, body).await?;
             bounded_output(output)
         })
         .instrument(span.clone())
@@ -1459,6 +1645,42 @@ impl HomeAssistantClient {
         read_body(response, &mut request_span)
             .instrument(body_span)
             .await
+    }
+
+    async fn post_json_acceptance(&self, url: Url, body: &Value) -> Result<(), Error> {
+        let mut request_span = http_client::RequestSpan::new(&reqwest::Method::POST);
+        let body = serde_json::to_vec(body).map_err(|_| Error::InvalidArguments)?;
+        let response = self
+            .http
+            .post(url)
+            .bearer_auth(self.token.expose())
+            .header(reqwest::header::ACCEPT, "application/json")
+            .header(reqwest::header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .with_extension(request_span.extension())
+            .send()
+            .instrument(request_span.span())
+            .await
+            .map_err(|_| {
+                request_span.transport_error();
+                Error::UpstreamUnavailable
+            })?;
+        let status = response.status();
+        let error = match status {
+            StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN => Some(Error::Unauthorized),
+            StatusCode::NOT_FOUND => Some(Error::NotFound),
+            StatusCode::TOO_MANY_REQUESTS => Some(Error::CapacityExhausted),
+            status if status.is_client_error() => Some(Error::RequestRejected),
+            status if !status.is_success() => Some(Error::UpstreamUnavailable),
+            _ => None,
+        };
+        if let Some(error) = error {
+            request_span.http_error(status);
+            return Err(error);
+        }
+        request_span.record_status(status);
+        request_span.success();
+        Ok(())
     }
 
     async fn open_websocket(&self) -> Result<HomeAssistantSocket, Error> {
@@ -2238,6 +2460,52 @@ fn normalize_stored_config(
     }))
 }
 
+fn normalize_blueprint(path: &str, value: &Value) -> Result<Option<BlueprintSummary>, Error> {
+    if !valid_blueprint_response_path(path) {
+        return Ok(None);
+    }
+    let Some(metadata) = value.get("metadata").and_then(Value::as_object) else {
+        return Ok(None);
+    };
+    if metadata.get("domain").and_then(Value::as_str) != Some("automation") {
+        return Ok(None);
+    }
+    let name = bounded_required_string(metadata.get("name"), 256)?;
+    let description = bounded_optional_string(metadata.get("description"), 1024)?;
+    let input = match metadata.get("input") {
+        None | Some(Value::Null) => None,
+        Some(value) => {
+            validate_native_json(value).map_err(|_| Error::InvalidResponse)?;
+            Some(value.clone())
+        }
+    };
+    Ok(Some(BlueprintSummary {
+        path: path.to_owned(),
+        name,
+        description,
+        input,
+    }))
+}
+
+fn valid_blueprint_response_path(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 255
+        && value.ends_with(".yaml")
+        && !value.starts_with('/')
+        && !value.starts_with('\\')
+        && !value.contains('\\')
+        && !value.chars().any(char::is_control)
+        && value.split('/').count() <= 8
+        && value.split('/').all(|segment| {
+            !segment.is_empty()
+                && !matches!(segment, "." | "..")
+                && segment.len() <= 128
+                && segment
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-' | b'.'))
+        })
+}
+
 fn case_fold(value: &str) -> String {
     value.case_fold().collect()
 }
@@ -2386,8 +2654,9 @@ mod tests {
     use tracing_subscriber::layer::SubscriberExt as _;
 
     use crate::integrations::home_assistant::actions::{
-        AutomationTracesQuery, AutomationValidation, ConfigGetQuery, ConfigListQuery, ConfigUpsert,
-        ControlAction, EntityControlInput, LightTurnOnInput,
+        AutomationFromBlueprint, AutomationTracesQuery, AutomationValidation, BlueprintListQuery,
+        BlueprintPath, BlueprintSave, ConfigGetQuery, ConfigListQuery, ConfigUpsert, ControlAction,
+        EntityControlInput, LightTurnOnInput,
     };
 
     use super::*;
@@ -5376,6 +5645,217 @@ mod tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn blueprint_operations_use_exact_commands_and_preflight_before_write() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_registry_response("blueprint/list", ws_result(1, json!({
+                "z.yaml":{"metadata":{"domain":"automation","name":"Zulu","description":"Other","secret":"omit"}},
+                "a.yaml":{"metadata":{"domain":"automation","name":"Alpha","description":"Match","input":{"target":{"name":"Target","selector":{"entity":{}}}},"secret":"omit"}},
+                "broken.yaml":{"error":"must-not-leak"},
+                "../private.yaml":{"metadata":{"domain":"automation","name":"Private"}},
+                "malformed.yaml":{"metadata":{"domain":"automation","name":"x".repeat(257)}}
+            })))
+            .with_registry_response("smarthome_mcp/blueprint/get", ws_result(1, json!({"yaml":"blueprint:\n  name: Safe","path":"must-not-trust","secret":"omit"})))
+            .with_registry_response("blueprint/substitute", ws_result(1, json!({"substituted_config":{"secret":"discard"}})));
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".into()),
+            Duration::from_secs(2),
+        );
+
+        let listed = client
+            .list_blueprints(&BlueprintListQuery {
+                search: Some("match".into()),
+                limit: 1,
+            })
+            .await
+            .unwrap();
+        assert_eq!(listed["blueprints"][0]["path"], "a.yaml");
+        assert_eq!(listed["truncated"], false);
+        let serialized = serde_json::to_string(&listed).unwrap();
+        assert!(!serialized.contains("secret"));
+        assert!(!serialized.contains("must-not-leak"));
+        assert_eq!(
+            client
+                .get_blueprint(&BlueprintPath("a.yaml".into()))
+                .await
+                .unwrap()["yaml"],
+            "blueprint:\n  name: Safe"
+        );
+        client
+            .save_blueprint(&BlueprintSave {
+                path: "a.yaml".into(),
+                yaml: "blueprint: {}".into(),
+            })
+            .await
+            .unwrap();
+        client
+            .automation_from_blueprint(&AutomationFromBlueprint {
+                config_key: "from_blueprint".into(),
+                path: "a.yaml".into(),
+                input: json!({"target":"light.kitchen"}),
+                alias: Some("Created".into()),
+                description: None,
+            })
+            .await
+            .unwrap();
+
+        let commands = mock.commands.lock().unwrap();
+        assert!(commands.contains(&json!({"id":1,"type":"blueprint/list","domain":"automation"})));
+        assert!(
+            commands
+                .contains(&json!({"id":1,"type":"smarthome_mcp/blueprint/get","path":"a.yaml"}))
+        );
+        assert!(commands.contains(&json!({"id":1,"type":"blueprint/save","domain":"automation","path":"a.yaml","yaml":"blueprint: {}","allow_override":true})));
+        assert!(commands.contains(&json!({"id":1,"type":"blueprint/substitute","domain":"automation","path":"a.yaml","input":{"target":"light.kitchen"}})));
+        drop(commands);
+        let requests = mock.requests.lock().unwrap();
+        let preflight = requests
+            .iter()
+            .position(|v| v == "ws-command:1:blueprint/substitute")
+            .unwrap();
+        let write = requests
+            .iter()
+            .position(|v| v == "config:/api/config/automation/config/from_blueprint")
+            .unwrap();
+        assert!(preflight < write);
+        assert!(requests.iter().any(|v| v == "config-body:{\"alias\":\"Created\",\"id\":\"from_blueprint\",\"use_blueprint\":{\"input\":{\"target\":\"light.kitchen\"},\"path\":\"a.yaml\"}}"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn failed_blueprint_preflight_never_writes() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([])).with_registry_response(
+            "blueprint/substitute",
+            json!({"id":1,"type":"result","success":false,"error":{"message":"private"}}),
+        );
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".into()),
+            Duration::from_secs(2),
+        );
+        let result = client
+            .automation_from_blueprint(&AutomationFromBlueprint {
+                config_key: "safe".into(),
+                path: "a.yaml".into(),
+                input: json!({}),
+                alias: None,
+                description: None,
+            })
+            .await;
+        assert_eq!(result, Err(Error::RequestRejected));
+        assert!(
+            !mock
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|v| v.starts_with("config:"))
+        );
+        assert!(client.has_full_test_capacity());
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn setup_is_idempotent_and_restart_is_separate_and_fixed() {
+        let configured = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_registry_response(
+                "config_entries/get",
+                ws_result(1, json!([{"entry_id":"private","domain":"smarthome_mcp"}])),
+            );
+        let (origin, server) = serve(configured.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".into()),
+            Duration::from_secs(2),
+        );
+        let result = client.setup_smarthome_mcp().await.unwrap();
+        assert_eq!(result["already_configured"], true);
+        assert!(
+            !configured
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|value| value.starts_with("config-flow-body:"))
+        );
+        server.abort();
+
+        let fresh = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_registry_response("config_entries/get", ws_result(1, json!([])))
+            .with_config_response(json!({"type":"create_entry","result":{"private":"omit"}}));
+        let (origin, server) = serve(fresh.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".into()),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            client.setup_smarthome_mcp().await.unwrap(),
+            json!({"action":"smarthome_mcp.setup","configured":true,"already_configured":false})
+        );
+        assert!(
+            fresh
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|value| value == "config-flow-body:{\"handler\":\"smarthome_mcp\"}")
+        );
+        assert!(
+            !fresh
+                .requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|value| value.contains("restart"))
+        );
+
+        assert_eq!(
+            client.restart_home_assistant().await.unwrap(),
+            json!({"action":"home_assistant.restart","accepted":true})
+        );
+        let requests = fresh.requests.lock().unwrap();
+        assert!(
+            requests
+                .iter()
+                .any(|value| value == "service:/api/services/homeassistant/restart")
+        );
+        assert!(requests.iter().any(|value| value == "service-body:{}"));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn setup_treats_already_configured_abort_after_empty_preflight_as_success() {
+        let mock = MockHomeAssistant::new(json!({}), json!([]), json!([]))
+            .with_registry_response("config_entries/get", ws_result(1, json!([])))
+            .with_config_response(json!({
+                "type":"abort",
+                "reason":"already_configured",
+                "private":"must-not-leak"
+            }));
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("test-token".into()),
+            Duration::from_secs(2),
+        );
+        assert_eq!(
+            client.setup_smarthome_mcp().await.unwrap(),
+            json!({"action":"smarthome_mcp.setup","configured":true,"already_configured":true})
+        );
+        assert!(
+            mock.requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|value| value == "config-flow-body:{\"handler\":\"smarthome_mcp\"}")
+        );
+        server.abort();
+    }
+
     async fn serve(mock: MockHomeAssistant) -> (Url, JoinHandle<()>) {
         let app = Router::new()
             .route("/api/websocket", get(websocket))
@@ -5388,6 +5868,7 @@ mod tests {
                 "/api/config/{domain}/config/{config_key}",
                 get(config_get).post(config_upsert),
             )
+            .route("/api/config/config_entries/flow", post(config_flow))
             .with_state(mock);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
@@ -5659,6 +6140,19 @@ mod tests {
         if let Some(delay) = mock.config_delay {
             tokio::time::sleep(delay).await;
         }
+        Json(mock.config_response).into_response()
+    }
+
+    async fn config_flow(
+        State(mock): State<MockHomeAssistant>,
+        headers: HeaderMap,
+        body: Bytes,
+    ) -> Response {
+        record_http_auth(&mock, &headers);
+        mock.requests.lock().unwrap().push(format!(
+            "config-flow-body:{}",
+            String::from_utf8_lossy(&body)
+        ));
         Json(mock.config_response).into_response()
     }
 

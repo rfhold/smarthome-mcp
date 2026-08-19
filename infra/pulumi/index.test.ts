@@ -21,6 +21,10 @@ const previousConfig = process.env.PULUMI_CONFIG;
 const previousSecretKeys = process.env.PULUMI_CONFIG_SECRET_KEYS;
 const previousHomeAssistantUrl = process.env.HOME_ASSISTANT_URL;
 const previousHomeAssistantToken = process.env.HOME_ASSISTANT_TOKEN;
+const previousHomeAssistantSshPassword =
+  process.env.HOME_ASSISTANT_SSH_PASSWORD;
+const previousHomeAssistantSshHostPublicKey =
+  process.env.HOME_ASSISTANT_SSH_HOST_PUBLIC_KEY;
 let program: typeof import("./index");
 
 before(async () => {
@@ -32,6 +36,11 @@ before(async () => {
     "smarthome-mcp:image":
       "registry.example.test/smarthome-mcp@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "smarthome-mcp:authentikBaseUrl": "https://auth.example.test",
+    "smarthome-mcp:homeAssistantSshHost": "172.16.1.10",
+    "smarthome-mcp:homeAssistantSshPort": "2200",
+    "smarthome-mcp:homeAssistantSshUsername": "root",
+    "smarthome-mcp:homeAssistantSshConfigRoot": "/config",
+    "smarthome-mcp:homeAssistantSshEgressCidr": "172.16.1.10/32",
     "smarthome-mcp:protectData": "true",
     "smarthome-mcp:storageClass": "test-storage",
     "smarthome-mcp:databaseStorageSize": "2Gi",
@@ -51,6 +60,9 @@ before(async () => {
   process.env.PULUMI_CONFIG_SECRET_KEYS = JSON.stringify([]);
   process.env.HOME_ASSISTANT_URL = "https://home-assistant.example.test";
   process.env.HOME_ASSISTANT_TOKEN = "test-home-assistant-token";
+  process.env.HOME_ASSISTANT_SSH_PASSWORD = "test-home-assistant-ssh-password";
+  process.env.HOME_ASSISTANT_SSH_HOST_PUBLIC_KEY =
+    "ssh-ed25519 test-home-assistant-host-public-key";
 
   pulumi.runtime.setMocks(
     {
@@ -119,6 +131,11 @@ after(() => {
   restoreEnv("PULUMI_CONFIG_SECRET_KEYS", previousSecretKeys);
   restoreEnv("HOME_ASSISTANT_URL", previousHomeAssistantUrl);
   restoreEnv("HOME_ASSISTANT_TOKEN", previousHomeAssistantToken);
+  restoreEnv("HOME_ASSISTANT_SSH_PASSWORD", previousHomeAssistantSshPassword);
+  restoreEnv(
+    "HOME_ASSISTANT_SSH_HOST_PUBLIC_KEY",
+    previousHomeAssistantSshHostPublicKey,
+  );
 });
 
 describe("configuration policy", () => {
@@ -157,12 +174,33 @@ describe("configuration policy", () => {
     );
     assert.match(preview, /^\s*smarthome-mcp:protectData: (?:"false"|false)$/m);
     assert.match(production, /^\s*smarthome-mcp:protectData: (?:"true"|true)$/m);
+    assert.match(
+      preview,
+      /^\s*smarthome-mcp:homeAssistantSshHost: 172\.16\.1\.10$/m,
+    );
+    assert.match(
+      preview,
+      /^\s*smarthome-mcp:homeAssistantSshPort: "2200"$/m,
+    );
+    assert.match(
+      preview,
+      /^\s*smarthome-mcp:homeAssistantSshUsername: root$/m,
+    );
+    assert.match(
+      preview,
+      /^\s*smarthome-mcp:homeAssistantSshConfigRoot: \/config$/m,
+    );
+    assert.match(
+      preview,
+      /^\s*smarthome-mcp:homeAssistantSshEgressCidr: 172\.16\.1\.10\/32$/m,
+    );
+    assert.doesNotMatch(production, /homeAssistantSsh/);
     for (const stack of [preview, production]) {
       assert.match(stack, /^\s*kubernetes:context: pantheon$/m);
       assert.doesNotMatch(stack, /^\s*smarthome-mcp:image:/m);
       assert.doesNotMatch(
         stack,
-        /(?:password|secret|privateKey|accessKeyId|HOME_ASSISTANT_TOKEN)\s*:/i,
+        /(?:password|secret|privateKey|accessKeyId|HOME_ASSISTANT_(?:TOKEN|SSH_PASSWORD|SSH_HOST_PUBLIC_KEY))\s*:/i,
       );
       assert.match(
         stack,
@@ -171,21 +209,61 @@ describe("configuration policy", () => {
     }
   });
 
-  test("stashes the process Home Assistant token before Secret use", () => {
+  test("protects all process-seeded Home Assistant Stashes", () => {
     const stashes = resources.filter(
       (candidate) => candidate.type === "pulumi:index:Stash",
     );
-    assert.equal(stashes.length, 2);
+    assert.equal(stashes.length, 4);
     const url = stashes.find((stash) => stash.name === "home-assistant-url");
     const token = stashes.find((stash) => stash.name === "home-assistant-token");
+    const sshPassword = stashes.find(
+      (stash) => stash.name === "home-assistant-ssh-password",
+    );
+    const sshHostPublicKey = stashes.find(
+      (stash) => stash.name === "home-assistant-ssh-host-public-key",
+    );
     assert.ok(url);
     assert.ok(token);
+    assert.ok(sshPassword);
+    assert.ok(sshHostPublicKey);
     const urlInput = url.inputs.input as Record<string, unknown>;
     const tokenInput = token.inputs.input as Record<string, unknown>;
+    const sshPasswordInput = sshPassword.inputs.input as Record<string, unknown>;
+    const sshHostPublicKeyInput = sshHostPublicKey.inputs.input as Record<
+      string,
+      unknown
+    >;
     assert.equal(urlInput.value, "https://home-assistant.example.test");
     assert.equal(tokenInput.value, "test-home-assistant-token");
+    assert.equal(sshPasswordInput.value, "test-home-assistant-ssh-password");
+    assert.equal(
+      sshHostPublicKeyInput.value,
+      "ssh-ed25519 test-home-assistant-host-public-key",
+    );
     assert.equal(Object.keys(urlInput).length, 2);
     assert.equal(Object.keys(tokenInput).length, 2);
+    assert.equal(Object.keys(sshPasswordInput).length, 2);
+    assert.equal(Object.keys(sshHostPublicKeyInput).length, 2);
+
+    const source = readFileSync(join(__dirname, "index.ts"), "utf8");
+    assert.equal((source.match(/new pulumi\.Stash/g) ?? []).length, 4);
+    assert.equal((source.match(/protect:\s*true/g) ?? []).length, 4);
+    assert.match(
+      source,
+      /process\.env\.HOME_ASSISTANT_SSH_PASSWORD \?\? unseededStashValue/,
+    );
+    assert.match(
+      source,
+      /process\.env\.HOME_ASSISTANT_SSH_HOST_PUBLIC_KEY \?\? unseededStashValue/,
+    );
+    assert.match(
+      source,
+      /HOME_ASSISTANT_SSH_PASSWORD stash must be seeded before deployment/,
+    );
+    assert.match(
+      source,
+      /HOME_ASSISTANT_SSH_HOST_PUBLIC_KEY stash must be seeded before deployment/,
+    );
   });
 });
 
@@ -307,6 +385,20 @@ describe("standalone resource topology", () => {
       "test-home-assistant-token",
     );
     assert.equal(app.SMARTHOME_MCP_HOME_ASSISTANT_ALLOW_INSECURE_HTTP, "false");
+    assert.equal(app.SMARTHOME_MCP_HOME_ASSISTANT_SSH_HOST, "172.16.1.10");
+    assert.equal(app.SMARTHOME_MCP_HOME_ASSISTANT_SSH_PORT, "2200");
+    assert.equal(app.SMARTHOME_MCP_HOME_ASSISTANT_SSH_USERNAME, "root");
+    assert.equal(app.SMARTHOME_MCP_HOME_ASSISTANT_SSH_CONFIG_ROOT, "/config");
+    assert.equal(
+      app.SMARTHOME_MCP_HOME_ASSISTANT_SSH_PASSWORD_FILE,
+      "/var/run/secrets/smarthome-mcp/home-assistant-ssh/password",
+    );
+    assert.equal(
+      app.SMARTHOME_MCP_HOME_ASSISTANT_SSH_HOST_PUBLIC_KEY_FILE,
+      "/var/run/secrets/smarthome-mcp/home-assistant-ssh/host_public_key",
+    );
+    assert.equal(app.SMARTHOME_MCP_HOME_ASSISTANT_SSH_PASSWORD, undefined);
+    assert.equal(app.SMARTHOME_MCP_HOME_ASSISTANT_SSH_HOST_PUBLIC_KEY, undefined);
     assert.equal(app.SMARTHOME_MCP_DEPLOYMENT_ENVIRONMENT, "test");
     assert.equal(app.SMARTHOME_MCP_SERVICE_NAMESPACE, "smarthome");
     assert.equal(
@@ -338,6 +430,42 @@ describe("standalone resource topology", () => {
         /test-home-assistant-token/,
       );
     }
+  });
+
+  test("keeps SSH credentials only in protected Stashes and a file Secret", () => {
+    const sshSecret = resource(
+      "kubernetes:core/v1:Secret",
+      "smarthome-mcp-home-assistant-ssh",
+    );
+    assert.ok(isSecret(sshSecret.inputs.stringData));
+    assert.deepEqual(unwrapSecrets(sshSecret.inputs.stringData), {
+      password: "test-home-assistant-ssh-password",
+      host_public_key: "ssh-ed25519 test-home-assistant-host-public-key",
+    });
+
+    for (const value of [
+      "test-home-assistant-ssh-password",
+      "ssh-ed25519 test-home-assistant-host-public-key",
+    ]) {
+      assert.deepEqual(
+        resources
+          .filter((candidate) => JSON.stringify(candidate.inputs).includes(value))
+          .map((candidate) => candidate.name)
+          .sort(),
+        [
+          value.includes("password")
+            ? "home-assistant-ssh-password"
+            : "home-assistant-ssh-host-public-key",
+          "smarthome-mcp-home-assistant-ssh",
+        ].sort(),
+      );
+    }
+
+    const app = environment();
+    assert.doesNotMatch(
+      JSON.stringify(app),
+      /test-home-assistant-ssh-password|ssh-ed25519 test-home-assistant-host-public-key/,
+    );
   });
 
   test("creates a versioned 32-byte keyring with checksum rollout", () => {
@@ -396,7 +524,7 @@ describe("standalone resource topology", () => {
         (deployment.inputs.metadata as any).annotations[
           "secret.reloader.stakater.com/reload"
         ],
-      "smarthome-mcp-app,smarthome-mcp-oauth-wrapping-keys",
+      "smarthome-mcp-app,smarthome-mcp-oauth-wrapping-keys,smarthome-mcp-home-assistant-ssh",
     );
     const pod = spec.template.spec;
     assert.deepEqual(spec.template.metadata.annotations, {
@@ -442,9 +570,33 @@ describe("standalone resource topology", () => {
       requests: { cpu: "50m", memory: "64Mi" },
       limits: { cpu: "500m", memory: "256Mi" },
     });
+    assert.deepEqual(
+      container.volumeMounts.find(
+        (mount: any) => mount.name === "home-assistant-ssh",
+      ),
+      {
+        name: "home-assistant-ssh",
+        mountPath: "/var/run/secrets/smarthome-mcp/home-assistant-ssh",
+        readOnly: true,
+      },
+    );
+    assert.equal(pod.securityContext.fsGroup, 65532);
+    const sshVolume = pod.volumes.find(
+      (volume: any) => volume.name === "home-assistant-ssh",
+    );
+    assert.equal(sshVolume.secret.secretName, "smarthome-mcp-home-assistant-ssh");
+    assert.equal(sshVolume.secret.defaultMode, 0o440);
+    assert.deepEqual(sshVolume.secret.items, [
+      { key: "password", path: "password", mode: 0o440 },
+      {
+        key: "host_public_key",
+        path: "host_public_key",
+        mode: 0o440,
+      },
+    ]);
   });
 
-  test("allows patterned DNS, HTTPS, telemetry, Traefik, and PostgreSQL egress", () => {
+  test("allows existing egress plus only the exact Home Assistant SSH endpoint", () => {
     const policy = resource(
       "kubernetes:networking.k8s.io/v1:NetworkPolicy",
       "smarthome-mcp-egress",
@@ -499,6 +651,10 @@ describe("standalone resource topology", () => {
         ],
         ports: [{ port: 5432, protocol: "TCP" }],
       },
+      {
+        to: [{ ipBlock: { cidr: "172.16.1.10/32" } }],
+        ports: [{ port: 2200, protocol: "TCP" }],
+      },
     ]);
   });
 
@@ -532,6 +688,40 @@ describe("standalone resource topology", () => {
     ]);
     const source = readFileSync(join(__dirname, "index.ts"), "utf8");
     assert.doesNotMatch(source, /export const .*?(?:token|password|secret|key)/i);
+  });
+
+  test("keeps the preview deploy task free of obsolete OpenBao authentication", () => {
+    const pipeline = readFileSync(
+      join(__dirname, "..", "..", ".tekton", "smarthome-mcp-preview.yaml"),
+      "utf8",
+    );
+    assert.doesNotMatch(
+      pipeline,
+      /openbao|VAULT_TOKEN|BAO_TOKEN|serviceAccountToken:/i,
+    );
+    assert.match(pipeline, /pulumi preview --stack preview --diff/);
+    assert.match(
+      pipeline,
+      /pulumi up --stack preview --yes --skip-preview/,
+    );
+    assert.match(pipeline, /name: pulumi-credentials/);
+    assert.match(pipeline, /name: authentik-credentials/);
+  });
+
+  test("removes obsolete release and OpenBao source", () => {
+    for (const file of [
+      "index.ts",
+      "package.json",
+      "bun.lock",
+      "Pulumi.preview.yaml",
+      "Pulumi.prod.yaml",
+    ]) {
+      const source = readFileSync(join(__dirname, file), "utf8");
+      assert.doesNotMatch(
+        source,
+        /@pulumi\/vault|releaseInfrastructureEnabled|openbao|smarthome-mcp-release-v1/i,
+      );
+    }
   });
 });
 

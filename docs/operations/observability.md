@@ -35,7 +35,7 @@ Home Assistant telemetry uses only fixed action and outcome labels. Queries use 
 
 The REST client span records client kind, request method, response status when available, and one bounded outcome. Outcomes are `success`, `http_error`, `transport_error`, `response_error`, and `cancelled`. `response_error` identifies a response-size rejection. A body read failure uses `transport_error`; a dropped future uses `cancelled`. Only 4xx and 5xx HTTP responses set OpenTelemetry error status solely from status. A 1xx or 3xx response can use `http_error` for application handling but retains unset OpenTelemetry status. No outcome contains an error or cause string.
 
-All telemetry follows the [exposure and data-safety privacy contract](../architecture/exposure-data-safety.md). Home Assistant metrics use the exact allowlisted action `camera.snapshot` and bounded outcomes without a camera dimension. The middleware applies only to service-owned Home Assistant REST requests. It does not instrument the tokio-tungstenite WebSocket used for exposure and fixed registry commands or dependency-owned OAuth and CIMD requests. MCP and host metrics likewise use bounded protocol and route dimensions.
+All telemetry follows the [exposure and data-safety privacy contract](../architecture/exposure-data-safety.md). Metrics use exact allowlisted actions and bounded outcomes. Blueprint and component deployment telemetry uses fixed labels without paths, YAML, inputs, component bytes, versions, hashes, credentials, host-key material, results, or raw errors. MCP and host metrics likewise use bounded protocol and route dimensions.
 
 ## Validation
 
@@ -57,6 +57,12 @@ Home Assistant failures in Mimir:
 
 ```promql
 sum by (action, outcome) (rate(smarthome_mcp_home_assistant_requests_total{service_name="smarthome-mcp",outcome!="success"}[5m]))
+```
+
+Component deployment failures in Mimir:
+
+```promql
+sum by (outcome) (rate(smarthome_mcp_component_deployment_requests_total{service_name="smarthome-mcp",outcome!="success"}[5m]))
 ```
 
 Service traces in Tempo:

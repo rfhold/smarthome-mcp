@@ -2,7 +2,9 @@
 
 ## Status
 
-The local Rust and Pulumi suites pass under Rust 1.96 and Bun. They provide unit, generated MCP transport, normalization, configuration, hosted-auth seam, and mocked infrastructure evidence. The preview pipeline has also built and verified the multi-architecture image, applied the Pulumi stack, reached a ready workload and healthy PostgreSQL cluster, and passed public health, readiness, MCP challenge, and metadata smoke checks. This evidence does not prove an authenticated Home Assistant action, browser OIDC flow, telemetry-backend delivery, backup restoration, or production behavior.
+The local Rust and Pulumi suites pass under Rust 1.96 and Bun. They provide unit, generated MCP transport, normalization, configuration, hosted-auth seam, component deployment, and mocked infrastructure evidence. Recorded preview evidence covers an earlier multi-architecture image, Pulumi apply, ready workload, healthy PostgreSQL cluster, and public health, readiness, MCP challenge, and metadata smoke checks.
+
+Local implementation and tests cover blueprint and component deployment schemas, routing, bounds, state checks, privacy, custom integration behavior, embedded source bytes, shared versions, and transaction recovery. They do not prove a live SSH/SFTP connection, Home Assistant compatibility, component installation or load, network-policy enforcement, restart, setup, or external behavior.
 
 ## Commands
 
@@ -23,66 +25,66 @@ bun run build
 bun test
 ```
 
-Run `git diff --check` before finalizing changes.
+Run custom-integration checks from the repository root:
+
+```bash
+uv sync --frozen
+uv run ruff format --check custom_components tests
+uv run ruff check custom_components tests
+uv run mypy
+uv run pytest
+```
+
+The Rust suite checks the MCP discovery metadata version against the Cargo package version and validates the embedded integration manifest and exact embedded file set against the repository component tree. The Python suite parses `Cargo.toml`, `pyproject.toml`, and the integration manifest, requires root SemVer, and rejects version drift. Locked Cargo commands enforce `Cargo.toml` and `Cargo.lock` consistency. Run `git diff --check` before finalizing changes.
 
 ## Current Coverage
 
 | Layer | Implemented evidence |
 | --- | --- |
-| Configuration and host | Strict environment parsing, Home Assistant origin policy, keyring parsing, health, readiness, and cancellation-safe HTTP metrics. |
+| Configuration and host | Strict environment parsing, Home Assistant origin and SSH configuration, keyring parsing, health, readiness, and cancellation-safe HTTP metrics. |
 | OAuth and OIDC seams | Exact `mcp:use` resource consent, `openid profile email` configuration, and stable issuer-plus-subject principal mapping. |
-| MCP contract | Progressive discovery, dotted actions, legacy-action rejection, separate query and execution tools, annotations, schema validation, synchronized JSON text and structured query results, specialized camera and execution results, and safe semantic errors. |
-| Home Assistant inputs | Entity IDs, domain/search limits, entity and device-list limits, entity counts, RFC3339 history ranges, defaults, read limits, and bounded common-control values. |
-| Home Assistant normalization | Approved state metadata only; device and effective-area enrichment is bounded; arbitrary attributes and raw registry data are omitted. |
-| Home Assistant telemetry | Fixed action/outcome labels and cancellation-safe counters. |
-| Pulumi | Immutable images, HTTPS origins, wrapping-key policy, Home Assistant process-secret propagation, Authentik, CNPG/backups, workload hardening, egress, Service, route, and safe outputs. |
+| MCP contract | Six-tool progressive discovery, dotted actions, legacy-action rejection, separate query and execution tools, annotations, schemas, synchronized query results, specialized camera results, and safe semantic errors. |
+| Home Assistant | Exposure-gated entity operations, bounded normalization, authoring and evidence actions, blueprint operations, setup, restart, and privacy controls. |
+| Component deployment | Closed confirmation schema, embedded version match, strict host-key parsing, install/update/no-op decisions, drift and downgrade rejection, bounded inspection, staging readback, lock handling, two-rename update, rollback, journal reconciliation, and cancellation continuity. |
+| Embedded component | Exact repository source bytes and path set, manifest domain, and manifest version matching the Cargo package version. Python tests independently reject root-package version drift. |
+| Pulumi | Protected credential Stashes, dedicated read-only SSH Secret, exact preview `/32` egress, immutable images, runtime resources, and fail-closed unseeded values. |
 
 ## Home Assistant Contract
 
-Tests must cover the [Home Assistant specifications](../home-assistant/README.md):
+Tests must cover the [Home Assistant specifications](../home-assistant/README.md), including:
 
-- fresh WebSocket authentication and exposure lookup for every entity-targeted invocation;
-- exact exposure command ID and type;
-- explicit `conversation: true` authorization only;
-- fail-closed handling for false, absent, malformed, unauthorized, and unavailable exposure results;
-- fixed REST methods and paths with bearer-header-only credentials;
-- deterministic list filtering, sorting, limits, and truncation;
-- selected-entity-only registry enrichment, device-area grouping, area overrides, standalone retention, and registry failure handling;
-- all-or-nothing authorization before per-entity state reads;
-- fixed minimal, no-attributes, significant-only history parameters;
-- approved normalized fields and bounded history points;
-- `camera.snapshot` input shape, `camera.*` restriction, and unknown-field rejection;
-- fresh exact exposure authorization before every camera image request;
-- fixed camera proxy GET routing and bearer authentication, with no service call or caller-selected upstream data;
-- exact JPEG, PNG, and WebP MIME values, matching signatures, standard Base64, and decoded and transport bounds;
-- camera success results with short text, one image block, bounded metadata, and no duplicate image bytes;
-- camera error mapping, timeouts, cancellation, capacity exhaustion, and permit release;
-- progressive camera discovery, namespace help, tool annotations, and response filtering;
-- camera privacy across errors, logs, traces, and metrics, including absence of identifiers, image data, paths, MIME, authentication data, headers, bodies, and raw errors;
-- separate `home_assistant_exec` discovery and annotations with read-only false, destructive true, idempotent false, and open-world true;
-- the complete [common-control action catalog](../home-assistant/common-controls.md), matching-domain single-entity targeting, unknown-field rejection, and every numeric boundary;
-- fresh exact `conversation: true` exposure before every common-control mutation, with no service POST on denied or malformed exposure;
-- fixed action-to-service POST mapping and bounded constructed JSON, with no caller-selected service, domain, path, method, headers, origin, or arbitrary data;
-- bounded upstream result consumption and minimal output without upstream wrappers, state, context, or service-response data;
-- rejection of batching, toggle, confirmations, presets, sources, modes, colors, templates, and unapproved actions;
-- `scene.upsert` and `automation.upsert` closed wrappers, safe bounded single-segment keys, object shape, encoded-byte, nesting-depth, and transport bounds;
-- acceptance of an absent top-level `id` or a string `id` equal to `config_key`, with rejection of every other value or type;
-- complete native scene and automation JSON forwarding to only the fixed admin config POSTs, with intentional matching-key replacement;
-- upserts and config reads without exposure lookup or recursive reference authorization, plus rejection of deletes and caller-selected routing;
-- bounded editor-managed scene and automation discovery from `/api/states`, safe-ID filtering, case-insensitive search, deterministic sort, limit, count, truncation, and omission of YAML-only entries and arbitrary attributes;
-- exact fixed config GET routing, complete bounded native object output, and rejection of malformed, oversized, or excessively nested responses;
-- minimal upsert acknowledgment that does not claim active operation after Home Assistant schedules its asynchronous reload;
-- `automation.validate` routing only to WebSocket `validate_config`, bounded projected acceptance, and no stored-config read;
-- `automation.traces` routing only to WebSocket `trace/list` with fixed `automation` domain and one validated item ID;
-- bounded trace summaries with only run ID, time, duration, state, execution status, not-triggered status, and safe error presence or category;
-- exclusion of raw errors, last steps, config, variables, state or service data, contexts, full traces, `trace/get`, debugging, subscriptions, and script execution;
-- clear result semantics: validation reflects current acceptance, traces describe past runs, and neither guarantees future behavior;
-- absence of config keys, entity IDs, names, item IDs, native config, trace data, and raw errors from telemetry and safe errors;
-- endpoint-wide `mcp:use` authority for all six tools, including Thread selection and Matter interview without a separate per-tool grant;
+- fresh WebSocket authentication and exact `conversation: true` exposure for every entity-targeted invocation;
+- fail-closed handling for absent, false, malformed, unauthorized, or unavailable exposure;
+- fixed REST and WebSocket routing with no caller-selected origin, credential, service, method, path, header, or command;
+- bounded deterministic list, state, history, device, camera, config, validation, trace, blueprint, Thread, and Matter projections;
+- the complete [common-control action catalog](../home-assistant/common-controls.md) and numeric boundaries;
+- eight fixed [authoring and evidence actions](../home-assistant/spec/authoring-evidence.md), including complete authorized config reads and bounded projected traces;
+- fixed blueprint list, semantic get, replace-save, substitution, setup, and separately confirmed restart behavior;
+- six-tool progressive discovery and endpoint-wide `mcp:use` authority without a separate management scope;
 - redirect denial, body/frame/URL/time/concurrency bounds, cancellation, and permit release; and
-- stable source-free error codes without URLs, credentials, bodies, entity IDs, or state data.
+- stable source-free errors without credentials, household values, identifiers, paths, bodies, or raw upstream errors.
 
-Mock transport coverage should prove these properties without contacting a live household. Live tests must use deliberately exposed non-sensitive fixtures and must never retain raw responses as shared artifacts.
+Mock transport coverage proves repository behavior without contacting a live household. Live tests must use deliberately exposed non-sensitive fixtures and must never retain raw responses as shared artifacts.
+
+## Component Deployment Coverage
+
+The local suite and required live evidence are governed by the [component deployment contract](../home-assistant/spec/component-deployment.md):
+
+- `smarthome_mcp.deploy` accepts only exact `confirm: true` and returns bounded operation metadata;
+- component files and manifest version equal package version `0.2.0` at build time;
+- the caller cannot select a host, port, user, path, repository, version, bytes, credential, or command;
+- Ed25519 host identity is pinned before password authentication and only SFTP is requested;
+- inspection rejects unknown nodes, modes, names, depth, entry count, file size, total size, and ambiguous transaction state;
+- absent installs, recognized lower SemVer updates, exact-content equal-version no-ops, and equal drift, newer, invalid, and downgrade cases fail as specified;
+- staging uses exclusive writes, bounded readback, exact file sets, and SHA-256 verification;
+- one local permit and one remote lock prevent unsafe concurrency;
+- update retains one backup and uses active-to-backup then staging-to-active renames;
+- failed commit rolls back, supported interrupted state reconciles, and ambiguous state fails closed;
+- cancellation does not abandon in-progress commit or rollback work;
+- deploy never restarts Home Assistant or invokes setup; and
+- telemetry excludes target details, paths, credentials, host-key material, component bytes, hashes, and raw errors.
+
+Local tests do not prove the independently seeded key, target identity, SSH negotiation, SFTP implementation, filesystem permissions, rename durability, network path, or Home Assistant component behavior. An authorized disposable or preview exercise must record exact MCP, component, and Home Assistant versions and only bounded outcomes.
 
 ## Hosted Access Contract
 
@@ -92,17 +94,14 @@ Negative tests must verify that errors, logs, redirects, traces, and MCP content
 
 ## Required External Evidence
 
-Before preview acceptance, record separate evidence for:
-
 | Layer | Required evidence |
 | --- | --- |
 | PostgreSQL | Embedded migrations, expiry, one-shot state, replay prevention, refresh rotation, and encrypted signing-key persistence against a disposable database. |
 | Authentik | Discovery, browser login, callback validation, and local token issuance. |
-| Kuri client | DCR, CIMD, loopback authorization, refresh, exact resource binding, and discovery and invocation of all six progressive tools. |
-| Home Assistant | Controlled exposure, bounded reads, fixed service calls, editor-managed scene and automation discovery and complete reads, replacement, asynchronous reload behavior, `validate_config`, projected `trace/list`, Thread selection, and projected Matter operations for non-sensitive fixtures. |
-| Container | Multi-architecture build, UID, revision label, private-material inspection, and startup with controlled dependencies. |
-| Preview | Authorized browser login, authenticated `/mcp`, bounded HA, Thread, and Matter operations, telemetry, probes, and secret non-disclosure. |
+| Kuri client | DCR, CIMD, loopback authorization, refresh, exact resource binding, and discovery and invocation of all six tools. |
+| Home Assistant | Version-pinned blueprint model, config flow, restart, custom integration load, and current controlled-operation evidence. |
+| SSH/SFTP | Independently verified Ed25519 host identity, password authentication, SFTP-only operation, bounded filesystem transaction, rollback, and recovery. |
+| Container | Multi-architecture build, UID, revision label, embedded component, private-material inspection, and startup with controlled dependencies. |
+| Preview | Authorized browser login, authenticated `/mcp`, bounded Home Assistant, deployment, Thread, and Matter operations, telemetry, probes, and secret non-disclosure. |
 
-The authoring and evidence tests must use a disposable Home Assistant instance and its configured administrator token. Record the tested Home Assistant version. Prove that non-admin credentials fail and that excluded APIs remain unreachable. Do not retain native config, full traces, or raw errors as evidence.
-
-Production additionally requires image and stack review, credential and wrapping-key rotation exercises, backup restoration, and recovery objectives. No external evidence is currently claimed.
+Production additionally requires target-specific SSH configuration, image and stack review, credential and wrapping-key rotation exercises, backup restoration, and recovery objectives. Production is currently unconfigured and no external component deployment evidence is claimed.

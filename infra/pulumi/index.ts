@@ -21,6 +21,21 @@ const authentikBaseUrl = validateHttpsOrigin(
   config.require("authentikBaseUrl"),
   "authentikBaseUrl",
 );
+const homeAssistantSshHost = config.require("homeAssistantSshHost");
+const homeAssistantSshPort = config.requireNumber("homeAssistantSshPort");
+const homeAssistantSshUsername = config.require("homeAssistantSshUsername");
+const homeAssistantSshConfigRoot = config.require("homeAssistantSshConfigRoot");
+const homeAssistantSshEgressCidr = config.require("homeAssistantSshEgressCidr");
+if (
+  !Number.isInteger(homeAssistantSshPort) ||
+  homeAssistantSshPort < 1 ||
+  homeAssistantSshPort > 65535
+) {
+  throw new Error("homeAssistantSshPort must be an integer from 1 through 65535");
+}
+if (homeAssistantSshEgressCidr !== `${homeAssistantSshHost}/32`) {
+  throw new Error("homeAssistantSshEgressCidr must pin homeAssistantSshHost as /32");
+}
 const protectData = config.requireBoolean("protectData");
 const storageClass = config.require("storageClass");
 const databaseStorageSize = config.require("databaseStorageSize");
@@ -49,12 +64,38 @@ const activeWrappingKeyVersion = config.require(
 validateWrappingKeyVersions(wrappingKeyVersions, activeWrappingKeyVersion);
 
 const unseededStashValue = "__smarthome_mcp_stash_unseeded__";
-const homeAssistantUrlStash = new pulumi.Stash("home-assistant-url", {
-  input: pulumi.secret(process.env.HOME_ASSISTANT_URL ?? unseededStashValue),
-});
-const homeAssistantTokenStash = new pulumi.Stash("home-assistant-token", {
-  input: pulumi.secret(process.env.HOME_ASSISTANT_TOKEN ?? unseededStashValue),
-});
+const homeAssistantUrlStash = new pulumi.Stash(
+  "home-assistant-url",
+  {
+    input: pulumi.secret(process.env.HOME_ASSISTANT_URL ?? unseededStashValue),
+  },
+  { protect: true },
+);
+const homeAssistantTokenStash = new pulumi.Stash(
+  "home-assistant-token",
+  {
+    input: pulumi.secret(process.env.HOME_ASSISTANT_TOKEN ?? unseededStashValue),
+  },
+  { protect: true },
+);
+const homeAssistantSshPasswordStash = new pulumi.Stash(
+  "home-assistant-ssh-password",
+  {
+    input: pulumi.secret(
+      process.env.HOME_ASSISTANT_SSH_PASSWORD ?? unseededStashValue,
+    ),
+  },
+  { protect: true },
+);
+const homeAssistantSshHostPublicKeyStash = new pulumi.Stash(
+  "home-assistant-ssh-host-public-key",
+  {
+    input: pulumi.secret(
+      process.env.HOME_ASSISTANT_SSH_HOST_PUBLIC_KEY ?? unseededStashValue,
+    ),
+  },
+  { protect: true },
+);
 const homeAssistantUrl = homeAssistantUrlStash.output.apply((value) => {
   if (
     typeof value !== "string" ||
@@ -75,6 +116,33 @@ const homeAssistantToken = homeAssistantTokenStash.output.apply((value) => {
   }
   return value;
 });
+const homeAssistantSshPassword = homeAssistantSshPasswordStash.output.apply(
+  (value) => {
+    if (
+      typeof value !== "string" ||
+      !value ||
+      value === unseededStashValue
+    ) {
+      throw new Error(
+        "HOME_ASSISTANT_SSH_PASSWORD stash must be seeded before deployment",
+      );
+    }
+    return value;
+  },
+);
+const homeAssistantSshHostPublicKey =
+  homeAssistantSshHostPublicKeyStash.output.apply((value) => {
+    if (
+      typeof value !== "string" ||
+      !value ||
+      value === unseededStashValue
+    ) {
+      throw new Error(
+        "HOME_ASSISTANT_SSH_HOST_PUBLIC_KEY stash must be seeded before deployment",
+      );
+    }
+    return value;
+  });
 
 const labels = {
   "app.kubernetes.io/name": "smarthome-mcp",
@@ -92,6 +160,11 @@ const wrappingKeyMountPath = "/var/run/secrets/smarthome-mcp/oauth";
 const wrappingKeyFile = `${wrappingKeyMountPath}/keyring.json`;
 const postgresTrustMountPath = "/var/run/secrets/smarthome-mcp/postgres";
 const postgresCaFile = `${postgresTrustMountPath}/ca.crt`;
+const homeAssistantSshMountPath =
+  "/var/run/secrets/smarthome-mcp/home-assistant-ssh";
+const homeAssistantSshPasswordFile = `${homeAssistantSshMountPath}/password`;
+const homeAssistantSshHostPublicKeyFile =
+  `${homeAssistantSshMountPath}/host_public_key`;
 
 const namespace = new k8s.core.v1.Namespace("smarthome-mcp-namespace", {
   metadata: { name: namespaceName, labels },
@@ -305,6 +378,22 @@ const wrappingKeySecret = new k8s.core.v1.Secret(
   },
 );
 
+const homeAssistantSshSecret = new k8s.core.v1.Secret(
+  "smarthome-mcp-home-assistant-ssh",
+  {
+    metadata: {
+      name: "smarthome-mcp-home-assistant-ssh",
+      namespace: namespace.metadata.name,
+      labels,
+    },
+    type: "Opaque",
+    stringData: {
+      password: homeAssistantSshPassword,
+      host_public_key: homeAssistantSshHostPublicKey,
+    },
+  },
+);
+
 const appSecret = new k8s.core.v1.Secret(
   "smarthome-mcp-app",
   {
@@ -341,6 +430,14 @@ const appSecret = new k8s.core.v1.Secret(
       SMARTHOME_MCP_HOME_ASSISTANT_URL: homeAssistantUrl,
       SMARTHOME_MCP_HOME_ASSISTANT_TOKEN: homeAssistantToken,
       SMARTHOME_MCP_HOME_ASSISTANT_ALLOW_INSECURE_HTTP: "false",
+      SMARTHOME_MCP_HOME_ASSISTANT_SSH_HOST: homeAssistantSshHost,
+      SMARTHOME_MCP_HOME_ASSISTANT_SSH_PORT: String(homeAssistantSshPort),
+      SMARTHOME_MCP_HOME_ASSISTANT_SSH_USERNAME: homeAssistantSshUsername,
+      SMARTHOME_MCP_HOME_ASSISTANT_SSH_CONFIG_ROOT: homeAssistantSshConfigRoot,
+      SMARTHOME_MCP_HOME_ASSISTANT_SSH_PASSWORD_FILE:
+        homeAssistantSshPasswordFile,
+      SMARTHOME_MCP_HOME_ASSISTANT_SSH_HOST_PUBLIC_KEY_FILE:
+        homeAssistantSshHostPublicKeyFile,
       SMARTHOME_MCP_DEPLOYMENT_ENVIRONMENT: deploymentEnvironment,
       SMARTHOME_MCP_SERVICE_NAMESPACE: "smarthome",
       SMARTHOME_MCP_PYROSCOPE_URL: "https://telemetry.holdenitdown.net:4040",
@@ -362,7 +459,7 @@ new k8s.apps.v1.Deployment(
       labels: workloadLabels,
       annotations: {
         "secret.reloader.stakater.com/reload":
-          "smarthome-mcp-app,smarthome-mcp-oauth-wrapping-keys",
+          "smarthome-mcp-app,smarthome-mcp-oauth-wrapping-keys,smarthome-mcp-home-assistant-ssh",
       },
     },
     spec: {
@@ -452,6 +549,11 @@ new k8s.apps.v1.Deployment(
                   mountPath: postgresTrustMountPath,
                   readOnly: true,
                 },
+                {
+                  name: "home-assistant-ssh",
+                  mountPath: homeAssistantSshMountPath,
+                  readOnly: true,
+                },
               ],
             },
           ],
@@ -475,12 +577,27 @@ new k8s.apps.v1.Deployment(
                 items: [{ key: "ca.crt", path: "ca.crt", mode: 0o444 }],
               },
             },
+            {
+              name: "home-assistant-ssh",
+              secret: {
+                secretName: homeAssistantSshSecret.metadata.name,
+                defaultMode: 0o440,
+                items: [
+                  { key: "password", path: "password", mode: 0o440 },
+                  {
+                    key: "host_public_key",
+                    path: "host_public_key",
+                    mode: 0o440,
+                  },
+                ],
+              },
+            },
           ],
         },
       },
     },
   },
-  { dependsOn: [appSecret, wrappingKeySecret] },
+  { dependsOn: [appSecret, wrappingKeySecret, homeAssistantSshSecret] },
 );
 
 new k8s.networking.v1.NetworkPolicy("smarthome-mcp-egress", {
@@ -539,6 +656,10 @@ new k8s.networking.v1.NetworkPolicy("smarthome-mcp-egress", {
           },
         ],
         ports: [{ port: 5432, protocol: "TCP" }],
+      },
+      {
+        to: [{ ipBlock: { cidr: homeAssistantSshEgressCidr } }],
+        ports: [{ port: homeAssistantSshPort, protocol: "TCP" }],
       },
     ],
   },

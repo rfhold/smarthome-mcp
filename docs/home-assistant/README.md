@@ -1,12 +1,14 @@
 # Home Assistant
 
-The Home Assistant integration has six progressive tools. Entity operations apply fresh Assist exposure authorization. Eight authoring, config-read, and evidence actions deliberately use endpoint-wide `mcp:use` plus the configured Home Assistant administrator token instead. Thread and Matter tools use separate fixed command and registry boundaries. Root help lists namespaces; namespace help lists actions and schemas.
+The current runtime has six progressive tools. Entity operations apply fresh Assist exposure authorization. Authoring, blueprint, component deployment, setup, restart, Thread, and Matter administrator actions use endpoint-wide `mcp:use`. Local code and tests cover these contracts. Live Home Assistant compatibility, SSH/SFTP deployment, installation, and external behavior remain unverified.
 
 | Document | Covers |
 | --- | --- |
 | [Shared contract](spec/common.md) | Tool boundaries, authentication, exposure, limits, normalization, and errors. |
 | [Common controls](common-controls.md) | The complete execution action catalog, inputs, fixed service mapping, and exclusions. |
 | [Authoring and evidence](spec/authoring-evidence.md) | Scene and automation discovery, exact native config reads, upserts, validation, projected traces, authority, and live evidence requirements. |
+| [Blueprints](spec/blueprints.md) | Custom integration, blueprint actions, setup, restart, bounds, authority, and compatibility. |
+| [Component deployment](spec/component-deployment.md) | Fixed private SFTP deployment, reconciliation, transaction, authority, privacy, and restart boundaries. |
 | [Thread and Matter](spec/thread-matter.md) | Complete Thread and Matter catalogs, schemas, projections, authorization, safety, and exclusions. |
 | [List entities](spec/list-entities.md) | Search, domain filters, ordering, and limits. |
 | [List devices](spec/list-devices.md) | Exposure-filtered current states grouped by device and effective area. |

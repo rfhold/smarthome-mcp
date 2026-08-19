@@ -18,7 +18,7 @@ Each `/mcp` request stands alone after token validation. The service requires no
 
 Every MCP request must use a locally issued ES256 JWT access token. Each token must use JWT type `at+jwt` and contain scope `mcp:use`.
 
-The endpoint-wide `mcp:use` scope authorizes all six progressive tools: the Home Assistant query and execution tools plus the Thread and Matter query and execution tools. There is no per-tool scope, so every valid token with `mcp:use` receives all implemented capabilities without a separate grant, consent, client registration, or issuer change. Entity operations still require fresh exact Assist exposure, but system-level Thread selection and Matter interview operations cannot use that entity authorization check. See the [common-control contract](../home-assistant/common-controls.md) and [Thread and Matter contract](../home-assistant/spec/thread-matter.md).
+The endpoint-wide `mcp:use` scope authorizes all six tools. There is no per-tool or separate management scope. Every valid token receives entity capabilities plus broad administrator, fixed machine-filesystem mutation, and restart authority. Entity operations still require fresh exact Assist exposure. The administrator actions do not. See the [common-control](../home-assistant/common-controls.md), [blueprint](../home-assistant/spec/blueprints.md), [component deployment](../home-assistant/spec/component-deployment.md), and [Thread and Matter](../home-assistant/spec/thread-matter.md) contracts.
 
 Authentik provides browser identity only. Authentik access tokens, ID tokens, and other Authentik credentials never authorize `/mcp`.
 
@@ -114,7 +114,7 @@ Database transactions must enforce expiry and atomic single-use behavior for aut
 
 ## Secret Boundaries
 
-- The service must read Authentik, PostgreSQL, Home Assistant, and OAuth key material only from runtime secret sources.
+- The service must read Authentik, PostgreSQL, Home Assistant, SSH, and OAuth key material only from runtime secret sources.
 - The service must send the Home Assistant token only in the REST `Authorization` header and WebSocket authentication message.
 - Browser URLs, redirects, logs, traces, MCP content, health responses, and OAuth errors must not contain secret values.
 - The service must not persist plaintext OAuth signing keys.

@@ -1,6 +1,8 @@
 # Contributing
 
-The repository implements hosted OAuth, authenticated MCP, and a bounded Home Assistant read integration. The generic Kuri `mcp` dependency uses a reviewed immutable Git revision.
+The repository implements hosted OAuth, authenticated MCP, and six bounded Home Assistant, Thread, and Matter tools. The generic Kuri `mcp` dependency uses a reviewed immutable Git revision.
+
+Blueprint and private component deployment have local implementation and test evidence. Keep that evidence separate from unverified live compatibility, installation, SSH/SFTP deployment, and external behavior.
 
 Use [docs/README.md](docs/README.md) to locate canonical contracts and current validation boundaries.
 
@@ -18,6 +20,18 @@ cargo +1.96.0 test --locked --all-features
 ```
 
 These commands pass against the exact Kuri Git pin.
+
+Run Home Assistant integration checks with the locked Python environment:
+
+```bash
+uv sync --frozen
+uv run ruff format --check custom_components tests
+uv run ruff check custom_components tests
+uv run mypy
+uv run pytest
+```
+
+The Rust suite verifies that MCP discovery metadata reports the Cargo package version and that the embedded integration manifest and file set match the repository component tree. The Python suite requires `Cargo.toml`, `pyproject.toml`, and the integration manifest to use the same root SemVer. Locked Cargo commands additionally enforce `Cargo.toml` and `Cargo.lock` consistency.
 
 Build the private-dependency runtime image with BuildKit secret handling:
 
@@ -51,6 +65,10 @@ For documentation-only changes:
 4. Verify that every relative Markdown link resolves.
 5. Verify that every populated domain under `docs/` has a `README.md` index.
 
+When a change affects blueprint or component compatibility, test only against a disposable Home Assistant instance and SSH/SFTP target. Record exact Home Assistant, component, and MCP versions. Do not retain credentials, sensitive fixtures, or raw responses.
+
 Do not commit, push, preview, deploy, or mutate an external system without explicit authority.
+
+The repository intentionally has no license file and makes no open-source license claim.
 
 The `preview` stack is deployed by the main pipeline. The `prod` stack is initialized with zero resources. Do not run `pulumi preview` or `pulumi up` without explicit target-specific authority.
