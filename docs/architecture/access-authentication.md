@@ -78,7 +78,7 @@ Authentik session lifetime does not extend local authorization codes, access tok
 
 | State | Lifetime |
 | --- | --- |
-| Access token | 300 seconds |
+| Access token | 259200 seconds (3 days) |
 | Authorization code | 300 seconds |
 | Refresh generation | 86400 seconds |
 | Refresh family | 2592000 seconds |
@@ -107,6 +107,8 @@ Generic Kuri migrations V1 through V3 own the hosted OAuth schema, signing keys,
 The generic dependency embeds and applies all four migrations in the `mcp` schema. No separate browser-state migration exists.
 
 The issuer must persist ES256 signing material in encrypted form. A versioned wrapping-key file must encrypt and decrypt that material outside PostgreSQL.
+
+Retired signing keys must remain available for verification for at least the access-token lifetime plus Kuri's 30-second clock skew. The 3-day access-token policy therefore requires 259230 seconds of verification overlap; shorter access-token policies retain Kuri's longer default overlap.
 
 The deployment must mount the wrapping key separately from database credentials. Loss of either boundary alone must not expose a usable signing key.
 

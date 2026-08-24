@@ -48,7 +48,7 @@ before(async () => {
     "smarthome-mcp:backupEndpoint": "https://s3.example.test",
     "smarthome-mcp:backupRetention": "7d",
     "smarthome-mcp:backupSchedule": "0 30 1 * * *",
-    "smarthome-mcp:mcpOAuthAccessTokenTtl": "300",
+    "smarthome-mcp:mcpOAuthAccessTokenTtl": "259200",
     "smarthome-mcp:mcpOAuthRefreshTokenTtl": "86400",
     "smarthome-mcp:mcpOAuthRefreshFamilyTtl": "2592000",
     "smarthome-mcp:mcpOAuthCodeTtl": "300",
@@ -197,6 +197,10 @@ describe("configuration policy", () => {
     assert.doesNotMatch(production, /homeAssistantSsh/);
     for (const stack of [preview, production]) {
       assert.match(stack, /^\s*kubernetes:context: pantheon$/m);
+      assert.match(
+        stack,
+        /^\s*smarthome-mcp:mcpOAuthAccessTokenTtl: "259200"$/m,
+      );
       assert.doesNotMatch(stack, /^\s*smarthome-mcp:image:/m);
       assert.doesNotMatch(
         stack,
@@ -365,6 +369,10 @@ describe("standalone resource topology", () => {
     assert.equal(app.SMARTHOME_MCP_OAUTH_ISSUER, "https://smarthome-mcp.example.test/oauth");
     assert.equal(app.SMARTHOME_MCP_OAUTH_RESOURCE, "https://smarthome-mcp.example.test/mcp");
     assert.equal(app.SMARTHOME_MCP_OAUTH_REQUIRED_SCOPE, "mcp:use");
+    assert.equal(app.SMARTHOME_MCP_OAUTH_ACCESS_TOKEN_TTL, "259200");
+    assert.equal(app.SMARTHOME_MCP_OAUTH_CODE_TTL, "300");
+    assert.equal(app.SMARTHOME_MCP_OAUTH_REFRESH_TOKEN_TTL, "86400");
+    assert.equal(app.SMARTHOME_MCP_OAUTH_REFRESH_FAMILY_TTL, "2592000");
     assert.equal(app.SMARTHOME_MCP_OAUTH_ALLOW_DCR, "true");
     assert.equal(app.SMARTHOME_MCP_OAUTH_ALLOW_CIMD, "true");
     assert.equal(

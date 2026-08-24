@@ -12,7 +12,7 @@ config:
   smarthome-mcp:backupEndpoint: https://s3.pantheon.holdenitdown.net
   smarthome-mcp:backupRetention: 30d
   smarthome-mcp:backupSchedule: 0 0 2 * * *
-  smarthome-mcp:mcpOAuthAccessTokenTtl: "300"
+  smarthome-mcp:mcpOAuthAccessTokenTtl: "259200"
   smarthome-mcp:mcpOAuthRefreshTokenTtl: "86400"
   smarthome-mcp:mcpOAuthRefreshFamilyTtl: "2592000"
   smarthome-mcp:mcpOAuthCodeTtl: "300"

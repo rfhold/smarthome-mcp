@@ -76,21 +76,7 @@ pub async fn initialize(
     )
     .await
     .map_err(|_| "failed to initialize OIDC resource-owner authentication".to_owned())?;
-    let mut policy = OAuthAuthorizationServerConfig::new(
-        oauth.issuer.clone(),
-        vec![OAuthResource {
-            resource: oauth.resource.clone(),
-            scopes: vec![oauth.required_scope.clone()],
-        }],
-    );
-    policy.authorization_code_lifetime = oauth.code_ttl;
-    policy.access_token_lifetime = oauth.access_token_ttl;
-    policy.refresh_token_lifetime = oauth.refresh_token_ttl;
-    policy.refresh_family_lifetime = oauth.refresh_family_ttl;
-    if oauth.allow_dcr {
-        policy.registration_endpoint =
-            Some(format!("{}/register", oauth.issuer.trim_end_matches('/')));
-    }
+    let policy = authorization_server_policy(oauth)?;
 
     let consent = Arc::new(AutoApproveConsent {
         resource: oauth.resource.clone(),
@@ -135,6 +121,34 @@ pub async fn initialize(
 
     initialize_signing_key(&pool, store.as_ref(), &server, &oauth.issuer).await?;
     Ok(OAuthRuntime { server, oidc, pool })
+}
+
+fn authorization_server_policy(
+    oauth: &OAuthConfig,
+) -> Result<OAuthAuthorizationServerConfig, String> {
+    let mut policy = OAuthAuthorizationServerConfig::new(
+        oauth.issuer.clone(),
+        vec![OAuthResource {
+            resource: oauth.resource.clone(),
+            scopes: vec![oauth.required_scope.clone()],
+        }],
+    );
+    policy.authorization_code_lifetime = oauth.code_ttl;
+    policy.access_token_lifetime = oauth.access_token_ttl;
+    policy.refresh_token_lifetime = oauth.refresh_token_ttl;
+    policy.refresh_family_lifetime = oauth.refresh_family_ttl;
+    let required_verification_overlap = policy
+        .access_token_lifetime
+        .checked_add(policy.clock_skew)
+        .ok_or_else(|| "invalid hosted OAuth configuration".to_owned())?;
+    policy.signing_verification_overlap = policy
+        .signing_verification_overlap
+        .max(required_verification_overlap);
+    if oauth.allow_dcr {
+        policy.registration_endpoint =
+            Some(format!("{}/register", oauth.issuer.trim_end_matches('/')));
+    }
+    Ok(policy)
 }
 
 async fn initialize_signing_key(
@@ -263,6 +277,70 @@ impl OAuthConsentHandler for AutoApproveConsent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn oauth_config(access_token_ttl: Duration, allow_dcr: bool) -> OAuthConfig {
+        OAuthConfig {
+            issuer: "https://mcp.example/oauth".to_owned(),
+            resource: "https://mcp.example/mcp".to_owned(),
+            required_scope: "mcp:use".to_owned(),
+            access_token_ttl,
+            refresh_token_ttl: Duration::from_secs(24 * 60 * 60),
+            refresh_family_ttl: Duration::from_secs(30 * 24 * 60 * 60),
+            code_ttl: Duration::from_secs(5 * 60),
+            allow_dcr,
+            allow_cimd: false,
+            cimd_trusted_private_origins: Vec::new(),
+            allow_loopback_redirects: false,
+            wrapping_keys_file: "unused-in-policy-test".to_owned(),
+        }
+    }
+
+    #[test]
+    fn policy_covers_three_day_access_tokens_with_signing_overlap() {
+        let policy = authorization_server_policy(&oauth_config(
+            Duration::from_secs(3 * 24 * 60 * 60),
+            false,
+        ))
+        .expect("policy should be valid");
+
+        assert_eq!(
+            policy.signing_verification_overlap,
+            Duration::from_secs(259_230)
+        );
+    }
+
+    #[test]
+    fn policy_preserves_default_signing_overlap_for_short_access_tokens() {
+        let policy = authorization_server_policy(&oauth_config(Duration::from_secs(5 * 60), false))
+            .expect("policy should be valid");
+
+        assert_eq!(
+            policy.signing_verification_overlap,
+            Duration::from_secs(10 * 60)
+        );
+    }
+
+    #[test]
+    fn policy_projects_configured_token_lifetimes() {
+        let oauth = oauth_config(Duration::from_secs(3 * 24 * 60 * 60), false);
+        let policy = authorization_server_policy(&oauth).expect("policy should be valid");
+
+        assert_eq!(policy.authorization_code_lifetime, oauth.code_ttl);
+        assert_eq!(policy.access_token_lifetime, oauth.access_token_ttl);
+        assert_eq!(policy.refresh_token_lifetime, oauth.refresh_token_ttl);
+        assert_eq!(policy.refresh_family_lifetime, oauth.refresh_family_ttl);
+    }
+
+    #[test]
+    fn policy_publishes_registration_endpoint_when_dcr_is_enabled() {
+        let policy = authorization_server_policy(&oauth_config(Duration::from_secs(5 * 60), true))
+            .expect("policy should be valid");
+
+        assert_eq!(
+            policy.registration_endpoint.as_deref(),
+            Some("https://mcp.example/oauth/register")
+        );
+    }
 
     #[tokio::test]
     async fn consent_only_approves_the_exact_resource_and_scope() {
