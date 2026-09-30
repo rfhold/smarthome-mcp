@@ -7,4 +7,5 @@ pub mod oauth;
 pub mod observability;
 pub mod profiling;
 pub mod services;
+mod skills;
 mod tool_error;

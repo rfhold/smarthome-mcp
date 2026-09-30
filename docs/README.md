@@ -5,7 +5,7 @@ This index routes readers to current runtime contracts, operational guidance, an
 | Document | Covers |
 | --- | --- |
 | [Architecture](architecture/README.md) | Service boundaries, components, data flows, and authentication. |
-| [Home Assistant](home-assistant/README.md) | Six current tools, including blueprint and private component deployment contracts. |
+| [Home Assistant](home-assistant/README.md) | Six current tools and the authored MCP Skills catalog, including blueprint and private component deployment contracts. |
 | [Operations](operations/README.md) | Service and component deployment, bootstrap, recovery, and external-action boundaries. |
 | [Quality](quality/README.md) | Verified local commands, current evidence, and remaining validation. |
 

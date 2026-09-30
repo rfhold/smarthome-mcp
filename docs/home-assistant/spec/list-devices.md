@@ -1,6 +1,6 @@
 # List Devices
 
-`device.list` returns current normalized states grouped by Home Assistant device and effective area. Root `help` advertises the `device` namespace; `help.device` describes this action and its schema.
+`device.list` returns current normalized states grouped by Home Assistant device and effective area. The `home_assistant_query` input schema exposes the action directly; the [MCP Skills catalog](skills.md) provides inspection guidance without `help` actions.
 
 | Input | Contract |
 | --- | --- |

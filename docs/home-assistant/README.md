@@ -5,6 +5,7 @@ The current runtime has six progressive tools. Entity operations apply fresh Ass
 | Document | Covers |
 | --- | --- |
 | [Shared contract](spec/common.md) | Tool boundaries, authentication, exposure, limits, normalization, and errors. |
+| [MCP Skills](spec/skills.md) | Immutable authored catalog, extension discovery, exact resource manifests, help cutover, and authority boundaries. |
 | [Common controls](common-controls.md) | The complete execution action catalog, inputs, fixed service mapping, and exclusions. |
 | [Authoring and evidence](spec/authoring-evidence.md) | Scene and automation discovery, exact native config reads, upserts, validation, projected traces, authority, and live evidence requirements. |
 | [Blueprints](spec/blueprints.md) | Custom integration, blueprint actions, setup, restart, bounds, authority, and compatibility. |

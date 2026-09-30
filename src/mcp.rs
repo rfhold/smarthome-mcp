@@ -47,6 +47,18 @@ const MATTER_EXEC_TOOL_NAME: &str = "matter_exec";
 #[derive(Clone)]
 pub struct SmarthomeMcp {
     services: Arc<Services>,
+    catalog: Arc<mcp::skills::SkillCatalog>,
+}
+
+impl SmarthomeMcp {
+    pub fn new(services: Arc<Services>) -> Result<Self, String> {
+        let catalog = crate::skills::catalog()
+            .map_err(|_| "invalid embedded MCP skill catalog".to_owned())?;
+        Ok(Self {
+            services,
+            catalog: Arc::new(catalog),
+        })
+    }
 }
 
 pub fn router(
@@ -54,7 +66,7 @@ pub fn router(
     services: Arc<Services>,
     oauth: &OAuthAuthorizationServer,
 ) -> Result<Router, String> {
-    let handler = Arc::new(SmarthomeMcp { services });
+    let handler = Arc::new(SmarthomeMcp::new(services)?);
     let required_scope = config.required_scope.clone();
     let metadata =
         McpProtectedResourceMetadata::new(config.resource.clone(), [config.issuer.clone()])
@@ -73,6 +85,7 @@ pub fn router(
 }
 
 #[mcp::progressive_server(
+    skills = self.catalog,
     name = "smarthome-mcp",
     version = "0.2.0",
     description = "Authenticated, policy-bounded smart-home tools.",
@@ -1439,9 +1452,7 @@ mod tests {
             Secret("test-token".to_owned()),
             timeout,
         );
-        let handler = Arc::new(SmarthomeMcp {
-            services: Arc::new(Services::new(client)),
-        });
+        let handler = Arc::new(SmarthomeMcp::new(Arc::new(Services::new(client))).unwrap());
         let (origin, task) = serve(mcp::server::streamable_http_router(handler)).await;
         (format!("{origin}/mcp"), task)
     }
@@ -1454,12 +1465,13 @@ mod tests {
             Secret("test-token".to_owned()),
             Duration::from_millis(100),
         );
-        let handler = Arc::new(SmarthomeMcp {
-            services: Arc::new(Services::new_with_component_deployer(
+        let handler = Arc::new(
+            SmarthomeMcp::new(Arc::new(Services::new_with_component_deployer(
                 client,
                 component_deployer,
-            )),
-        });
+            )))
+            .unwrap(),
+        );
         let (origin, task) = serve(mcp::server::streamable_http_router(handler)).await;
         (format!("{origin}/mcp"), task)
     }
@@ -1589,6 +1601,8 @@ mod tests {
             .header("mcp-method", method);
         if let Some(name) = body["params"]["name"].as_str() {
             request = request.header("mcp-name", name);
+        } else if method == "resources/read" {
+            request = request.header("mcp-name", body["params"]["uri"].as_str().unwrap());
         }
         let response = request.json(&body).send().await.unwrap();
         let status = response.status();
@@ -1677,32 +1691,6 @@ mod tests {
         assert!(query_schema.contains("blueprint.get"));
         assert!(exec_schema.contains("\"const\":true"));
 
-        for (tool, help, action) in [
-            (TOOL_NAME, "help.blueprint", "blueprint.list"),
-            (EXEC_TOOL_NAME, "help.smarthome_mcp", "smarthome_mcp.deploy"),
-            (
-                EXEC_TOOL_NAME,
-                "help.home_assistant",
-                "home_assistant.restart",
-            ),
-        ] {
-            let (_, response) = post(
-                &endpoint,
-                request(
-                    "tools/call",
-                    help,
-                    json!({"name":tool,"arguments":{"action":help}}),
-                ),
-            )
-            .await;
-            assert!(
-                response["result"]["structuredContent"]["actions"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|entry| entry["action"] == action)
-            );
-        }
         task.abort();
     }
 
@@ -1821,45 +1809,6 @@ mod tests {
         }
         assert!(query_schema.contains("\"additionalProperties\":false"));
 
-        let (_, help) = post(
-            &endpoint,
-            request(
-                "tools/call",
-                "help.automation",
-                json!({"name":TOOL_NAME,"arguments":{"action":"help.automation"}}),
-            ),
-        )
-        .await;
-        let actions = help["result"]["structuredContent"]["actions"]
-            .as_array()
-            .unwrap();
-        assert_eq!(actions.len(), 4);
-        assert!(
-            actions
-                .iter()
-                .any(|entry| entry["action"] == "automation.validate")
-        );
-        assert!(
-            actions
-                .iter()
-                .any(|entry| entry["action"] == "automation.traces")
-        );
-        let (_, scene_help) = post(
-            &endpoint,
-            request(
-                "tools/call",
-                "help.scene",
-                json!({"name":TOOL_NAME,"arguments":{"action":"help.scene"}}),
-            ),
-        )
-        .await;
-        assert_eq!(
-            scene_help["result"]["structuredContent"]["actions"]
-                .as_array()
-                .unwrap()
-                .len(),
-            2
-        );
         task.abort();
     }
 
@@ -1884,9 +1833,7 @@ mod tests {
             Secret("test-token".to_owned()),
             Duration::from_secs(10),
         );
-        let handler = Arc::new(SmarthomeMcp {
-            services: Arc::new(Services::new(client.clone())),
-        });
+        let handler = Arc::new(SmarthomeMcp::new(Arc::new(Services::new(client.clone()))).unwrap());
         let logs = Arc::new(Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::registry().with(
             tracing_subscriber::fmt::layer()
@@ -2141,35 +2088,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn thread_and_matter_help_and_semantic_errors_are_safe() {
+    async fn thread_and_matter_semantic_errors_are_safe() {
         let (endpoint, task) = endpoint().await;
-        for (tool, namespace_help, action) in [
-            (THREAD_QUERY_TOOL_NAME, "help.network", "network.list"),
-            (THREAD_QUERY_TOOL_NAME, "help.router", "router.discover"),
-            (THREAD_QUERY_TOOL_NAME, "help.readiness", "readiness.get"),
-            (
-                THREAD_EXEC_TOOL_NAME,
-                "help.network",
-                "network.set_preferred",
-            ),
-            (MATTER_QUERY_TOOL_NAME, "help.device", "device.list"),
-            (MATTER_EXEC_TOOL_NAME, "help.device", "device.interview"),
-        ] {
-            let (_, response) = post(
-                &endpoint,
-                request(
-                    "tools/call",
-                    namespace_help,
-                    json!({"name":tool,"arguments":{"action":namespace_help}}),
-                ),
-            )
-            .await;
-            let actions = response["result"]["structuredContent"]["actions"]
-                .as_array()
-                .unwrap();
-            assert!(actions.iter().any(|entry| entry["action"] == action));
-        }
-
         for (tool, action, input) in [
             (
                 THREAD_QUERY_TOOL_NAME,
@@ -2390,79 +2310,422 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generated_help_and_schema_use_only_dotted_actions() {
+    async fn skills_list_get_and_every_resource_round_trip_exact_embedded_bytes() {
+        use mcp::skills::{McpSkillList, McpSkillResources, parse_skill_frontmatter};
+        use sha2::{Digest as _, Sha256};
+
         let (endpoint, task) = endpoint().await;
-        let (_, response) = post(
+        let (_, discovery) = post(
+            &endpoint,
+            request("server/discover", "skills-capability", json!({})),
+        )
+        .await;
+        assert!(
+            discovery["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/skills"]
+                .is_object()
+        );
+        assert_ne!(
+            discovery["result"]["capabilities"]["extensions"]["io.modelcontextprotocol/skills"]["directoryRead"],
+            true
+        );
+        let (_, response) = post(&endpoint, request("skills/list", "skills", json!({}))).await;
+        let list: McpSkillList = serde_json::from_value(response["result"].clone()).unwrap();
+        assert_eq!(list.skills.len(), 5);
+        assert_eq!(list.ttl_ms, 0);
+        assert_eq!(list.cache_scope, mcp::skills::SkillCacheScope::Private);
+        assert!(list.next_cursor.is_none());
+        let mut names = Vec::new();
+        for skill in &list.skills {
+            let name = skill.frontmatter["name"].as_str().unwrap();
+            names.push(name);
+            assert_eq!(skill.uri, format!("skill://smarthome/{name}/SKILL.md"));
+            let (_, response) = post(
+                &endpoint,
+                request("skills/get", "get-skill", json!({"uri":skill.uri})),
+            )
+            .await;
+            assert_eq!(
+                response["result"]["skill"],
+                serde_json::to_value(skill).unwrap()
+            );
+            assert_eq!(response["result"]["resultType"], "complete");
+            assert_eq!(response["result"]["ttlMs"], 0);
+            assert_eq!(response["result"]["cacheScope"], "private");
+            let McpSkillResources::Files(files) = &skill.resources else {
+                panic!("catalog must be immutable");
+            };
+            assert_eq!(files.len(), 2);
+            for file in files {
+                let (_, response) = post(
+                    &endpoint,
+                    request("resources/read", "read-skill", json!({"uri":file.uri})),
+                )
+                .await;
+                assert_eq!(response["result"]["resultType"], "complete");
+                assert_eq!(response["result"]["ttlMs"], 0);
+                assert_eq!(response["result"]["cacheScope"], "private");
+                let contents = response["result"]["contents"].as_array().unwrap();
+                assert_eq!(contents.len(), 1);
+                assert_eq!(contents[0]["uri"], file.uri);
+                let bytes = contents[0]["text"].as_str().unwrap().as_bytes();
+                let relative = file
+                    .uri
+                    .strip_prefix(&format!("skill://smarthome/{name}/"))
+                    .unwrap();
+                let expected = std::fs::read(
+                    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                        .join("skills")
+                        .join(name)
+                        .join(relative),
+                )
+                .unwrap();
+                assert_eq!(bytes, expected);
+                assert_eq!(file.size, bytes.len() as u64);
+                let hex = Sha256::digest(bytes)
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                assert_eq!(file.digest, format!("sha256:{hex}"));
+                mcp::skills::verify_skill_bytes(skill, &file.uri, bytes).unwrap();
+                if file.uri == skill.uri {
+                    assert_eq!(parse_skill_frontmatter(bytes).unwrap(), skill.frontmatter);
+                }
+            }
+        }
+        assert_eq!(
+            names,
+            [
+                "author-home-config",
+                "control-home",
+                "inspect-home",
+                "inspect-thread-matter",
+                "maintain-home-integration"
+            ]
+        );
+        assert_eq!(
+            list.skills
+                .iter()
+                .find(|skill| skill.frontmatter["name"] == "inspect-home")
+                .unwrap()
+                .frontmatter["metadata"]["authority"],
+            "assist-exposure"
+        );
+        assert_eq!(
+            list.skills
+                .iter()
+                .find(|skill| skill.frontmatter["name"] == "inspect-home")
+                .unwrap()
+                .frontmatter["x-smarthome"],
+            json!({"workflow":"inspection"})
+        );
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn hosted_skill_methods_keep_bearer_scope_and_origin_protection() {
+        use mcp::server::{McpHostedTokenValidation, McpTokenAuthorization};
+
+        let client = HomeAssistantClient::for_test(
+            url::Url::parse("http://127.0.0.1:1/").unwrap(),
+            Secret("test-token".to_owned()),
+            Duration::from_millis(100),
+        );
+        let handler = Arc::new(SmarthomeMcp::new(Arc::new(Services::new(client))).unwrap());
+        let metadata = McpProtectedResourceMetadata::new(
+            "https://mcp.example/mcp",
+            ["https://mcp.example/oauth"],
+        )
+        .with_scopes(["mcp:use"]);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let seen = calls.clone();
+        let authorization = StreamableHttpAuthorization::hosted(metadata, move |token, context| {
+            let seen = seen.clone();
+            Box::pin(async move {
+                seen.fetch_add(1, Ordering::Relaxed);
+                assert_eq!(context.required_scopes, ["mcp:use"]);
+                assert_eq!(context.resource, "https://mcp.example/mcp");
+                match token.0.as_str() {
+                    "valid" => McpHostedTokenValidation::Authorized(McpTokenAuthorization {
+                        principal_id: mcp::McpPrincipalId::new("skill-test").unwrap(),
+                        expires_at: None,
+                        revocation: None,
+                    }),
+                    "wrong-scope" => McpHostedTokenValidation::InsufficientScope {
+                        required_scopes: vec!["mcp:use".to_owned()],
+                        error_description: None,
+                    },
+                    _ => McpHostedTokenValidation::Unauthorized {
+                        error_description: None,
+                    },
+                }
+            })
+        })
+        .unwrap()
+        .with_required_scopes(["mcp:use"]);
+        let (origin, task) = serve(streamable_http_router_with_options(
+            handler,
+            StreamableHttpOptions::default()
+                .without_root_protected_resource_metadata()
+                .with_authorization(authorization),
+        ))
+        .await;
+        for (method, params) in [
+            ("skills/list", json!({})),
+            (
+                "skills/get",
+                json!({"uri":"skill://smarthome/inspect-home/SKILL.md"}),
+            ),
+            (
+                "resources/read",
+                json!({"uri":"skill://smarthome/inspect-home/references/queries.md"}),
+            ),
+        ] {
+            for (token, request_origin, expected, error) in [
+                (None, None, StatusCode::UNAUTHORIZED, None),
+                (
+                    Some("wrong"),
+                    None,
+                    StatusCode::UNAUTHORIZED,
+                    Some("invalid_token"),
+                ),
+                (
+                    Some("wrong-scope"),
+                    None,
+                    StatusCode::FORBIDDEN,
+                    Some("insufficient_scope"),
+                ),
+                (
+                    Some("valid"),
+                    Some("https://evil.example"),
+                    StatusCode::FORBIDDEN,
+                    None,
+                ),
+                (Some("valid"), None, StatusCode::OK, None),
+            ] {
+                let mut request_builder = Client::new()
+                    .post(format!("{origin}/mcp"))
+                    .header("accept", "application/json, text/event-stream")
+                    .header("content-type", "application/json")
+                    .header("mcp-protocol-version", MCP_PROTOCOL_VERSION)
+                    .header("mcp-method", method);
+                if method == "resources/read" {
+                    request_builder =
+                        request_builder.header("mcp-name", params["uri"].as_str().unwrap());
+                }
+                if let Some(token) = token {
+                    request_builder = request_builder.bearer_auth(token);
+                }
+                if let Some(origin) = request_origin {
+                    request_builder = request_builder.header("origin", origin);
+                }
+                let response = request_builder
+                    .json(&request(method, "protected", params.clone()))
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), expected, "{method}");
+                if expected == StatusCode::UNAUTHORIZED || error.is_some() {
+                    let challenge = mcp::McpBearerChallenge::parse_any(
+                        response
+                            .headers()
+                            .get_all("www-authenticate")
+                            .iter()
+                            .map(|v| v.to_str().unwrap()),
+                    )
+                    .unwrap();
+                    assert_eq!(challenge.error.as_deref(), error);
+                    assert!(challenge.resource_metadata.is_some());
+                    if error == Some("insufficient_scope") {
+                        assert_eq!(challenge.scope.as_deref(), Some("mcp:use"));
+                    }
+                }
+                if expected == StatusCode::OK {
+                    assert!(response.text().await.unwrap().contains("inspect-home"));
+                }
+            }
+        }
+        assert!(calls.load(Ordering::Relaxed) >= 9);
+        task.abort();
+    }
+
+    #[tokio::test]
+    async fn skill_resources_read_directly_and_unknown_requests_fail() {
+        let (endpoint, task) = endpoint().await;
+        let (_, direct) = post(
             &endpoint,
             request(
-                "tools/call",
-                "help",
-                json!({"name": TOOL_NAME, "arguments":{"action":"help"}}),
+                "resources/read",
+                "direct",
+                json!({"uri":"skill://smarthome/control-home/references/controls.md"}),
             ),
         )
         .await;
-        let serialized = serde_json::to_string(&response).unwrap();
-        for namespace_help in [
-            "help.entity",
-            "help.device",
-            "help.state",
-            "help.history",
-            "help.camera",
-            "help.automation",
-            "help.scene",
+        assert!(
+            direct["result"]["contents"][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("# Controls\n")
+        );
+        for (method, params, code) in [
+            (
+                "skills/get",
+                json!({"uri":"skill://smarthome/missing/SKILL.md"}),
+                -32602,
+            ),
+            ("skills/list", json!({"cursor":"unknown"}), -32602),
+            (
+                "resources/read",
+                json!({"uri":"skill://smarthome/control-home/references/missing.md"}),
+                -32602,
+            ),
+            (
+                "resources/read",
+                json!({"uri":"skill://smarthome/control-home/../inspect-home/SKILL.md"}),
+                -32602,
+            ),
         ] {
-            assert!(serialized.contains(namespace_help));
+            let (_, response) = post(&endpoint, request(method, "unknown", params)).await;
+            assert_eq!(response["error"]["code"], code, "{response}");
         }
-        for legacy in ["list_entities", "list_devices", "get_states", "get_history"] {
-            assert!(!serialized.contains(legacy));
-        }
-        for (namespace_help, action) in [
-            ("help.entity", "entity.list"),
-            ("help.device", "device.list"),
-            ("help.state", "state.get"),
-            ("help.history", "history.get"),
-            ("help.camera", "camera.snapshot"),
-            ("help.automation", "automation.validate"),
-            ("help.scene", "scene.list"),
-        ] {
-            let (_, help) = post(
-                &endpoint,
-                request(
-                    "tools/call",
-                    namespace_help,
-                    json!({"name": TOOL_NAME, "arguments":{"action":namespace_help}}),
-                ),
-            )
-            .await;
-            assert!(
-                help["result"]["structuredContent"]["actions"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .any(|entry| entry["action"] == action)
-            );
-        }
+        task.abort();
+    }
 
-        let (_, discovery) = post(&endpoint, request("tools/list", "list", json!({}))).await;
-        let schema =
-            serde_json::to_string(&discovery["result"]["tools"][0]["inputSchema"]).unwrap();
-        for action in [
-            "entity.list",
-            "device.list",
-            "state.get",
-            "history.get",
-            "camera.snapshot",
-            "automation.validate",
-            "automation.traces",
-            "automation.list",
-            "automation.get",
-            "scene.list",
-            "scene.get",
-        ] {
-            assert!(schema.contains(action));
-        }
-        for legacy in ["list_entities", "list_devices", "get_states", "get_history"] {
-            assert!(!schema.contains(legacy));
+    #[tokio::test]
+    async fn all_tool_schemas_have_exact_domain_enums_and_reject_removed_help() {
+        let (endpoint, task) = endpoint().await;
+        let (_, response) = post(&endpoint, request("tools/list", "list", json!({}))).await;
+        let catalogs: [(&str, &[&str]); 6] = [
+            (
+                TOOL_NAME,
+                &[
+                    "entity.list",
+                    "device.list",
+                    "state.get",
+                    "history.get",
+                    "camera.snapshot",
+                    "automation.list",
+                    "automation.get",
+                    "automation.validate",
+                    "automation.traces",
+                    "scene.list",
+                    "scene.get",
+                    "blueprint.list",
+                    "blueprint.get",
+                ],
+            ),
+            (
+                EXEC_TOOL_NAME,
+                &[
+                    "scene.activate",
+                    "scene.upsert",
+                    "automation.upsert",
+                    "blueprint.save",
+                    "automation.from_blueprint",
+                    "smarthome_mcp.deploy",
+                    "smarthome_mcp.setup",
+                    "home_assistant.restart",
+                    "light.turn_on",
+                    "light.turn_off",
+                    "switch.turn_on",
+                    "switch.turn_off",
+                    "fan.turn_on",
+                    "fan.turn_off",
+                    "fan.set_percentage",
+                    "cover.open",
+                    "cover.close",
+                    "cover.stop",
+                    "cover.set_position",
+                    "climate.turn_on",
+                    "climate.turn_off",
+                    "climate.set_temperature",
+                    "media_player.turn_on",
+                    "media_player.turn_off",
+                    "media_player.play",
+                    "media_player.pause",
+                    "media_player.stop",
+                    "media_player.volume_set",
+                    "lock.lock",
+                    "lock.unlock",
+                ],
+            ),
+            (
+                THREAD_QUERY_TOOL_NAME,
+                &["network.list", "router.discover", "readiness.get"],
+            ),
+            (
+                THREAD_EXEC_TOOL_NAME,
+                &["network.set_preferred", "router.set_preferred"],
+            ),
+            (
+                MATTER_QUERY_TOOL_NAME,
+                &[
+                    "readiness.get",
+                    "device.list",
+                    "device.diagnostics",
+                    "device.ping",
+                ],
+            ),
+            (MATTER_EXEC_TOOL_NAME, &["device.interview"]),
+        ];
+        for (name, expected) in catalogs {
+            let tool = response["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|tool| tool["name"] == name)
+                .unwrap();
+            let mut actual = tool["inputSchema"]["properties"]["action"]["enum"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_str().unwrap())
+                .collect::<Vec<_>>();
+            let mut expected = expected.to_vec();
+            actual.sort_unstable();
+            expected.sort_unstable();
+            assert_eq!(actual, expected, "{name}");
+            let serialized = tool["inputSchema"].to_string();
+            assert!(!serialized.contains("help"));
+            assert!(!serialized.contains("runbooks"));
+            for action in [
+                "help",
+                "help.entity",
+                "help.device",
+                "help.state",
+                "help.history",
+                "help.camera",
+                "help.automation",
+                "help.scene",
+                "help.blueprint",
+                "help.smarthome_mcp",
+                "help.home_assistant",
+                "help.light",
+                "help.switch",
+                "help.fan",
+                "help.cover",
+                "help.climate",
+                "help.media_player",
+                "help.lock",
+                "help.network",
+                "help.router",
+                "help.readiness",
+                "help.runbooks",
+                "runbooks.load",
+            ] {
+                let (_, response) = post(
+                    &endpoint,
+                    request(
+                        "tools/call",
+                        "removed",
+                        json!({"name":name,"arguments":{"action":action}}),
+                    ),
+                )
+                .await;
+                assert_eq!(
+                    response["error"]["code"], -32602,
+                    "{name} accepted {action}"
+                );
+            }
         }
         task.abort();
     }

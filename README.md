@@ -4,6 +4,8 @@
 
 The current runtime implements hosted OAuth, stateless MCP, and six progressive Home Assistant, Thread, and Matter tools. Entity operations require current Assist exposure. Fixed administrator actions support authoring, blueprints, private component deployment, setup, and confirmed restart.
 
+Five authored [MCP Skills](docs/home-assistant/spec/skills.md) provide workflow guidance through `skills/list`, `skills/get`, and exact resource reads. Tool schemas list domain actions directly; generated `help` actions are removed with no compatibility aliases. Skill discovery does not grant mutation authority.
+
 The Home Assistant component is embedded in the MCP binary for deployment to one server-owned SFTP target. Local Rust and Python tests cover the bounded behavior, but no live SSH/SFTP or Home Assistant component deployment evidence exists. Endpoint-wide `mcp:use` grants broad administrator, fixed machine-filesystem mutation, and availability authority.
 
 Implementation entry points are [the library](src/lib.rs), [the Axum process](src/main.rs), [the container build](Dockerfile), [Pulumi](infra/pulumi/), and [the preview pipeline](.tekton/smarthome-mcp-preview.yaml).

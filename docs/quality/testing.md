@@ -43,7 +43,7 @@ The Rust suite checks the MCP discovery metadata version against the Cargo packa
 | --- | --- |
 | Configuration and host | Strict environment parsing, Home Assistant origin and SSH configuration, keyring parsing, health, readiness, and cancellation-safe HTTP metrics. |
 | OAuth and OIDC seams | Exact `mcp:use` resource consent, `openid profile email` configuration, and stable issuer-plus-subject principal mapping. |
-| MCP contract | Six-tool progressive discovery, dotted actions, legacy-action rejection, separate query and execution tools, annotations, schemas, synchronized query results, specialized camera results, and safe semantic errors. |
+| MCP contract | Six-tool discovery with exact domain enums, removed-help and legacy-action rejection, authored skills list/get and exact resource bytes, sizes, SHA-256 manifests and frontmatter, separate query and execution tools, annotations, schemas, synchronized query results, specialized camera results, and safe semantic errors. |
 | Home Assistant | Exposure-gated entity operations, bounded normalization, authoring and evidence actions, blueprint operations, setup, restart, and privacy controls. |
 | Component deployment | Closed confirmation schema, embedded version match, strict host-key parsing, install/update/no-op decisions, drift and downgrade rejection, bounded inspection, staging readback, lock handling, two-rename update, rollback, journal reconciliation, and cancellation continuity. |
 | Embedded component | Exact repository source bytes and path set, manifest domain, and manifest version matching the Cargo package version. Python tests independently reject root-package version drift. |
