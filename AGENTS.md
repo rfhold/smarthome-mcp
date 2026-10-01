@@ -7,7 +7,7 @@
 | [custom_components/smarthome_mcp/](custom_components/smarthome_mcp/) | Home Assistant custom integration for bounded semantic blueprint reads. |
 | [Dockerfile](Dockerfile) | Multi-stage Rust build and non-root Debian runtime image. |
 | [infra/pulumi/](infra/pulumi/) | Preview and production deployment declarations plus mock tests. |
-| [.tekton/](.tekton/) | Preview pipeline declaration. |
+| [.tekton/](.tekton/) | Preview build and signed-tag production promotion pipelines. |
 | [docs/](docs/) | Repository architecture, Home Assistant contracts, operations, and quality evidence. |
 | [CONTRIBUTING.md](CONTRIBUTING.md) | Verified local commands and contribution boundaries. |
 

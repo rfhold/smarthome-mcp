@@ -5,6 +5,11 @@ config:
   smarthome-mcp:displayName: Smarthome MCP
   smarthome-mcp:slug: smarthome-mcp
   smarthome-mcp:authentikBaseUrl: https://auth.holdenitdown.net
+  smarthome-mcp:homeAssistantSshHost: 172.16.1.10
+  smarthome-mcp:homeAssistantSshPort: "2200"
+  smarthome-mcp:homeAssistantSshUsername: root
+  smarthome-mcp:homeAssistantSshConfigRoot: /homeassistant
+  smarthome-mcp:homeAssistantSshEgressCidr: 172.16.1.10/32
   smarthome-mcp:protectData: "true"
   smarthome-mcp:storageClass: shared-fs
   smarthome-mcp:databaseStorageSize: 20Gi

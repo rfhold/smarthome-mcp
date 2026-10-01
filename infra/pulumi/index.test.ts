@@ -194,7 +194,26 @@ describe("configuration policy", () => {
       preview,
       /^\s*smarthome-mcp:homeAssistantSshEgressCidr: 172\.16\.1\.10\/32$/m,
     );
-    assert.doesNotMatch(production, /homeAssistantSsh/);
+    assert.match(
+      production,
+      /^\s*smarthome-mcp:homeAssistantSshHost: 172\.16\.1\.10$/m,
+    );
+    assert.match(
+      production,
+      /^\s*smarthome-mcp:homeAssistantSshPort: "2200"$/m,
+    );
+    assert.match(
+      production,
+      /^\s*smarthome-mcp:homeAssistantSshUsername: root$/m,
+    );
+    assert.match(
+      production,
+      /^\s*smarthome-mcp:homeAssistantSshConfigRoot: \/homeassistant$/m,
+    );
+    assert.match(
+      production,
+      /^\s*smarthome-mcp:homeAssistantSshEgressCidr: 172\.16\.1\.10\/32$/m,
+    );
     for (const stack of [preview, production]) {
       assert.match(stack, /^\s*kubernetes:context: pantheon$/m);
       assert.match(
