@@ -1,6 +1,6 @@
 # Home Assistant Common Controls
 
-`home_assistant_exec` contains entity controls, scene and automation upserts, blueprint operations, component deployment, setup, and restart. Its MCP annotations are `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, and `openWorldHint: true`. The endpoint-wide `mcp:use` scope authorizes every tool; there is no per-tool OAuth scope. The [authoring and evidence contract](spec/authoring-evidence.md) defines upserts. The [blueprint contract](spec/blueprints.md) defines blueprint and lifecycle actions. The [component deployment contract](spec/component-deployment.md) defines fixed private filesystem replacement.
+`execute` contains fixed entity controls, component deployment, setup, restart, Thread selection, and Matter interview. Its annotations are `readOnlyHint: false`, `destructiveHint: true`, `idempotentHint: false`, and `openWorldHint: true`. Endpoint-wide `mcp:use` has no per-tool scope separation. The [resource-first contract](spec/resource-first.md) owns public routing and excludes unconditional config upserts and blueprint replacement. The [component deployment contract](spec/component-deployment.md) retains fixed private filesystem replacement.
 
 ## Actions
 

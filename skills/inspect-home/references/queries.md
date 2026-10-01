@@ -1,14 +1,14 @@
 # Queries
 
-Call `home_assistant_query` with `action`, action-specific `input`, and optional jq-compatible `filter`. Use the live schema for exact fields, defaults, and bounds; unknown wrapper fields fail. Filters keep JSON text and structured content synchronized, but are not an authorization boundary.
+Read current data with MCP resources. Call `query` for temporal history with `action`, action-specific `input`, and optional jq-compatible `filter`. Use discovery for exact templates, fields, and bounds; unknown wrapper fields fail. Filters are not an authorization boundary.
 
 | Action | Use |
 | --- | --- |
-| `entity.list` | Search or filter normalized Assist-exposed entities by domain with a bounded limit. |
-| `device.list` | Group exposed states by device and effective area; standalone entities remain identifiable. |
-| `state.get` | Read up to 25 explicit entity IDs, all currently exposed. |
+| `smarthome://entities` | Bounded normalized Assist-exposed entities with canonical links. |
+| `smarthome://devices` | Exposed states grouped by device and area; follow entity-anchored group links. |
+| `smarthome://states/{entity_id}` | One currently exposed entity, using a returned state link. |
 | `history.get` | Read minimal significant history for up to 10 IDs over at most 24 hours; arbitrary attributes are excluded. |
-| `camera.snapshot` | Read one exposed camera's current frame as an MCP image with bounded metadata. |
+| `smarthome://cameras/{entity_id}` | One exposed camera's current frame as an MCP resource blob. |
 
 Use returned exact IDs. Missing, revoked, or indeterminate exposure is a denial, not an invitation to use another route. Camera images can reveal private surroundings; request them only when needed and do not log or unnecessarily repeat them. A snapshot is an observation, not a continuous feed. A successful history or state read is not proof of future state.
 

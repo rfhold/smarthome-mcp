@@ -1,6 +1,6 @@
 # Controls
 
-Call `home_assistant_exec` with `action` and `input`. Every action here requires exactly one `entity_id` matching the action's domain. The live schema is authoritative; wrappers reject unknown fields. There is no batching, toggle, arbitrary service data, or caller-selected service.
+Call `execute` with `action` and `input`. Every action here requires exactly one `entity_id` matching the action's domain. The live schema is authoritative; wrappers reject unknown fields. There is no batching, toggle, arbitrary service data, or caller-selected service.
 
 | Actions | Additional input |
 | --- | --- |

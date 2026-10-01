@@ -1,9 +1,12 @@
 #![allow(clippy::useless_vec)]
 
+mod authoring;
+
 use std::{future::Future, pin::Pin, sync::Arc};
 
 use axum::Router;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use mcp::server::ServerHandler as _;
 use mcp::{
     McpProtectedResourceMetadata, McpToolResult, OAuthAuthorizationServer,
     server::{
@@ -45,13 +48,13 @@ const MATTER_QUERY_TOOL_NAME: &str = "matter_query";
 const MATTER_EXEC_TOOL_NAME: &str = "matter_exec";
 
 #[derive(Clone)]
-pub struct SmarthomeMcp {
+struct SmarthomeMcp {
     services: Arc<Services>,
     catalog: Arc<mcp::skills::SkillCatalog>,
 }
 
 impl SmarthomeMcp {
-    pub fn new(services: Arc<Services>) -> Result<Self, String> {
+    fn new(services: Arc<Services>) -> Result<Self, String> {
         let catalog = crate::skills::catalog()
             .map_err(|_| "invalid embedded MCP skill catalog".to_owned())?;
         Ok(Self {
@@ -66,7 +69,7 @@ pub fn router(
     services: Arc<Services>,
     oauth: &OAuthAuthorizationServer,
 ) -> Result<Router, String> {
-    let handler = Arc::new(SmarthomeMcp::new(services)?);
+    let handler = Arc::new(ResourceFirstMcp(SmarthomeMcp::new(services)?));
     let required_scope = config.required_scope.clone();
     let metadata =
         McpProtectedResourceMetadata::new(config.resource.clone(), [config.issuer.clone()])
@@ -82,6 +85,545 @@ pub fn router(
         .without_root_protected_resource_metadata()
         .with_authorization(authorization);
     Ok(streamable_http_router_with_options(handler, options))
+}
+
+// Keep the published dependency's generated action handlers private behind the
+// resource-first protocol boundary; the wrapper owns discovery and dispatch.
+#[derive(Clone)]
+struct ResourceFirstMcp(SmarthomeMcp);
+
+const RESOURCE_CATALOGS: &[(&str, &str, &str, &str, &str)] = &[
+    (
+        "entities",
+        "Entities",
+        "home_assistant_query",
+        "entity.list",
+        "entities",
+    ),
+    (
+        "devices",
+        "Devices grouped by exposed entity",
+        "home_assistant_query",
+        "device.list",
+        "devices",
+    ),
+    (
+        "scenes",
+        "Stored scenes",
+        "home_assistant_query",
+        "scene.list",
+        "entries",
+    ),
+    (
+        "automations",
+        "Stored automations",
+        "home_assistant_query",
+        "automation.list",
+        "entries",
+    ),
+    (
+        "blueprints",
+        "Semantic automation blueprints",
+        "home_assistant_query",
+        "blueprint.list",
+        "blueprints",
+    ),
+    (
+        "thread/networks",
+        "Stored Thread networks",
+        "thread_query",
+        "network.list",
+        "networks",
+    ),
+    (
+        "matter/devices",
+        "Registered Matter devices",
+        "matter_query",
+        "device.list",
+        "devices",
+    ),
+];
+
+fn public_action(tool: &str, action: &str) -> Option<(&'static str, String)> {
+    match tool {
+        "home_assistant_query" if matches!(action, "history.get" | "automation.validate") => {
+            Some(("query", action.into()))
+        }
+        "thread_query" if matches!(action, "router.discover" | "readiness.get") => {
+            Some(("query", format!("thread.{action}")))
+        }
+        "matter_query"
+            if matches!(
+                action,
+                "readiness.get" | "device.diagnostics" | "device.ping"
+            ) =>
+        {
+            Some(("query", format!("matter.{action}")))
+        }
+        "home_assistant_exec"
+            if matches!(
+                action,
+                "scene.activate"
+                    | "smarthome_mcp.deploy"
+                    | "smarthome_mcp.setup"
+                    | "home_assistant.restart"
+                    | "light.turn_on"
+                    | "light.turn_off"
+                    | "switch.turn_on"
+                    | "switch.turn_off"
+                    | "fan.turn_on"
+                    | "fan.turn_off"
+                    | "fan.set_percentage"
+                    | "cover.open"
+                    | "cover.close"
+                    | "cover.stop"
+                    | "cover.set_position"
+                    | "climate.turn_on"
+                    | "climate.turn_off"
+                    | "climate.set_temperature"
+                    | "media_player.turn_on"
+                    | "media_player.turn_off"
+                    | "media_player.play"
+                    | "media_player.pause"
+                    | "media_player.stop"
+                    | "media_player.volume_set"
+                    | "lock.lock"
+                    | "lock.unlock"
+            ) =>
+        {
+            Some(("execute", action.into()))
+        }
+        "thread_exec" if matches!(action, "network.set_preferred" | "router.set_preferred") => {
+            Some(("execute", format!("thread.{action}")))
+        }
+        "matter_exec" if action == "device.interview" => {
+            Some(("execute", format!("matter.{action}")))
+        }
+        _ => None,
+    }
+}
+
+impl ResourceFirstMcp {
+    async fn catalog_value(
+        &self,
+        path: &str,
+        context: ServerContext,
+    ) -> ServerResult<serde_json::Value> {
+        let (_, _, tool, action, field) = RESOURCE_CATALOGS
+            .iter()
+            .find(|entry| entry.0 == path)
+            .ok_or_else(|| ServerError::invalid_params("unknown resource catalog"))?;
+        let input = if *action == "network.list" {
+            json!({})
+        } else {
+            json!({"limit":100})
+        };
+        let result = self
+            .0
+            .call_tool(
+                mcp::McpToolCall::new(*tool, json!({"action":action,"input":input})),
+                context,
+            )
+            .await?;
+        let mut value = resource_output(result)?;
+        let entries = value[*field]
+            .as_array_mut()
+            .ok_or_else(|| ServerError::internal("invalid resource catalog"))?;
+        for entry in entries {
+            let id = match path {
+                "entities" => entry["entity_id"].as_str(),
+                "devices" => entry["entities"][0]["entity_id"].as_str(),
+                "scenes" | "automations" => entry["config_key"].as_str(),
+                "blueprints" => entry["path"].as_str(),
+                "thread/networks" => entry["dataset_id"].as_str(),
+                "matter/devices" => entry["device_id"].as_str(),
+                _ => None,
+            }
+            .ok_or_else(|| ServerError::internal("invalid resource catalog"))?
+            .to_owned();
+            let uri = item_uri(path, &id);
+            entry["uri"] = json!(uri);
+            if path == "entities" {
+                entry["state_uri"] = json!(item_uri("states", &id));
+                if id.starts_with("camera.") {
+                    entry["camera_uri"] = json!(item_uri("cameras", &id));
+                }
+            } else if path == "automations" {
+                entry["traces_uri"] = json!(format!("{}/traces", item_uri(path, &id)));
+            }
+        }
+        Ok(value)
+    }
+
+    async fn dynamic_resource(
+        &self,
+        uri: &str,
+        context: ServerContext,
+    ) -> ServerResult<mcp::McpResourceResult> {
+        let path = uri
+            .strip_prefix("smarthome://")
+            .ok_or_else(|| ServerError::invalid_params("invalid resource URI"))?;
+        if RESOURCE_CATALOGS.iter().any(|entry| entry.0 == path) {
+            return bounded_text_resource(mcp::McpResourceResult::text(
+                uri,
+                "application/json",
+                resource_json_text(&self.catalog_value(path, context).await?)?,
+            ));
+        }
+        let (catalog, encoded_id, traces) = if let Some(id) = path
+            .strip_prefix("automations/")
+            .and_then(|rest| rest.strip_suffix("/traces"))
+        {
+            ("automations", id, true)
+        } else {
+            let (catalog, id) = if let Some(id) = path.strip_prefix("thread/networks/") {
+                ("thread/networks", id)
+            } else if let Some(id) = path.strip_prefix("matter/devices/") {
+                ("matter/devices", id)
+            } else {
+                path.split_once('/')
+                    .ok_or_else(|| ServerError::invalid_params("invalid resource URI"))?
+            };
+            (catalog, id, false)
+        };
+        let id = decode_item_id(encoded_id)?;
+        if item_uri(catalog, &id)
+            != if traces {
+                uri.strip_suffix("/traces")
+                    .ok_or_else(|| ServerError::invalid_params("invalid resource URI"))?
+            } else {
+                uri
+            }
+        {
+            return Err(ServerError::invalid_params("noncanonical resource URI"));
+        }
+        if matches!(catalog, "scenes" | "automations" | "blueprints") && !traces {
+            authoring::target(uri)?;
+            return self.authoring_resource(uri, context).await;
+        }
+        let (tool, action, input) = match catalog {
+            "entities" | "states" => (
+                "home_assistant_query",
+                "state.get",
+                json!({"entity_ids":[id]}),
+            ),
+            "cameras" => (
+                "home_assistant_query",
+                "camera.snapshot",
+                json!({"entity_id":id}),
+            ),
+            "scenes" | "automations" | "blueprints" | "devices" | "thread/networks"
+            | "matter/devices" => {
+                let value = self.catalog_value(catalog, context.clone()).await?;
+                let field = RESOURCE_CATALOGS
+                    .iter()
+                    .find(|entry| entry.0 == catalog)
+                    .ok_or_else(|| ServerError::internal("invalid resource catalog"))?
+                    .4;
+                let canonical = item_uri(catalog, &id);
+                let entry = value[field]
+                    .as_array()
+                    .and_then(|entries| entries.iter().find(|entry| entry["uri"] == canonical))
+                    .ok_or_else(|| ServerError::resource_not_found("unavailable resource"))?;
+                if matches!(catalog, "devices" | "thread/networks" | "matter/devices") {
+                    return bounded_text_resource(mcp::McpResourceResult::text(
+                        uri,
+                        "application/json",
+                        resource_json_text(entry)?,
+                    ));
+                }
+                match catalog {
+                    "scenes" => (
+                        "home_assistant_query",
+                        "scene.get",
+                        json!({"config_key":id}),
+                    ),
+                    "automations" if traces => (
+                        "home_assistant_query",
+                        "automation.traces",
+                        json!({"item_id":id,"limit":50}),
+                    ),
+                    "automations" => (
+                        "home_assistant_query",
+                        "automation.get",
+                        json!({"config_key":id}),
+                    ),
+                    _ => ("home_assistant_query", "blueprint.get", json!({"path":id})),
+                }
+            }
+            _ => return Err(ServerError::resource_not_found("unavailable resource")),
+        };
+        let result = self
+            .0
+            .call_tool(
+                mcp::McpToolCall::new(tool, json!({"action":action,"input":input})),
+                context,
+            )
+            .await?;
+        if catalog == "cameras" {
+            if result.raw["isError"] == true {
+                return Err(ServerError::resource_not_found("unavailable camera"));
+            }
+            let image = result.raw["content"]
+                .as_array()
+                .and_then(|blocks| blocks.iter().find(|block| block["type"] == "image"))
+                .ok_or_else(|| ServerError::internal("invalid camera resource"))?;
+            return Ok(mcp::McpResourceResult::new(
+                json!({"contents":[{"uri":uri,"mimeType":image["mimeType"],"blob":image["data"]}]}),
+            ));
+        }
+        let value = resource_output(result)?;
+        let text = resource_json_text(&value)?;
+        if text.len() > 256 * 1024 {
+            return Err(ServerError::internal("resource text exceeds size limit"));
+        }
+        let result = mcp::McpResourceResult::text(uri, "application/json", &text);
+        bounded_text_resource(result)
+    }
+}
+
+const MAX_TEXT_RESOURCE_BYTES: usize = 2 * 1024 * 1024;
+
+fn resource_json_text(value: &serde_json::Value) -> ServerResult<String> {
+    serde_json::to_string_pretty(value)
+        .map_err(|_| ServerError::internal("unable to serialize resource text"))
+}
+
+fn bounded_text_resource(result: mcp::McpResourceResult) -> ServerResult<mcp::McpResourceResult> {
+    let serialized = serde_json::to_vec(&result.raw)
+        .map_err(|_| ServerError::internal("unable to serialize resource response"))?;
+    if serialized.len() > MAX_TEXT_RESOURCE_BYTES {
+        return Err(ServerError::internal(
+            "resource response exceeds size limit",
+        ));
+    }
+    Ok(result)
+}
+
+fn resource_output(result: McpToolResult) -> ServerResult<serde_json::Value> {
+    if result.raw["isError"] == true {
+        return Err(ServerError::resource_not_found("unavailable resource"));
+    }
+    result
+        .raw
+        .get("structuredContent")
+        .cloned()
+        .ok_or_else(|| ServerError::internal("invalid resource response"))
+}
+
+fn item_uri(catalog: &str, id: &str) -> String {
+    let mut encoded = String::new();
+    for byte in id.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    format!("smarthome://{catalog}/{encoded}")
+}
+
+fn decode_item_id(encoded: &str) -> ServerResult<String> {
+    if encoded.is_empty() || encoded.len() > 768 {
+        return Err(ServerError::invalid_params("invalid resource URI"));
+    }
+    let bytes = encoded.as_bytes();
+    let mut decoded = Vec::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes
+                .get(i + 1..i + 3)
+                .and_then(|part| std::str::from_utf8(part).ok())
+                .and_then(|part| u8::from_str_radix(part, 16).ok())
+                .ok_or_else(|| ServerError::invalid_params("invalid resource URI"))?;
+            decoded.push(hex);
+            i += 3;
+        } else {
+            decoded.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let id = String::from_utf8(decoded)
+        .map_err(|_| ServerError::invalid_params("invalid resource URI"))?;
+    if id.chars().any(char::is_control) {
+        return Err(ServerError::invalid_params("invalid resource URI"));
+    }
+    Ok(id)
+}
+
+impl mcp::server::ServerHandler for ResourceFirstMcp {
+    fn server_info(&self) -> mcp::server::ServerInfo {
+        self.0.server_info()
+    }
+    fn capabilities(&self) -> mcp::server::ServerCapabilities {
+        self.0.capabilities()
+    }
+    fn skill_catalog(&self) -> Option<Arc<mcp::SkillCatalog>> {
+        Some(self.0.catalog.clone())
+    }
+    fn instructions(&self) -> Option<String> {
+        Some("Read smarthome:// catalogs and resource templates for current data. Use query for probes and execute for physical/lifecycle commands. Create and direct revision-checked edit use existing native APIs under a single-writer assumption; checks are best-effort, not atomic. Never retry an unknown mutation outcome. No destroy tool exists.".into())
+    }
+    fn list_tools(
+        &self,
+        cursor: Option<String>,
+        context: ServerContext,
+    ) -> mcp::server::BoxFuture<ServerResult<mcp::McpToolList>> {
+        let this = self.clone();
+        Box::pin(async move {
+            let private = this.0.list_tools(cursor, context).await?;
+            let mut tools = Vec::new();
+            for name in ["query", "execute"] {
+                let mut actions = Vec::new();
+                let mut inputs = Vec::new();
+                for tool in &private.tools {
+                    let old_actions = tool.input_schema["properties"]["action"]["enum"]
+                        .as_array()
+                        .unwrap();
+                    let old_inputs = tool.input_schema["properties"]["input"]["oneOf"]
+                        .as_array()
+                        .unwrap();
+                    for (action, input) in old_actions.iter().zip(old_inputs) {
+                        let action = action.as_str().unwrap();
+                        if let Some((target, public)) = public_action(&tool.name, action)
+                            && target == name
+                        {
+                            let mut input = input.clone();
+                            input["description"] = json!(format!("Use with action `{public}`."));
+                            actions.push(public.clone());
+                            inputs.push(input);
+                        }
+                    }
+                }
+                let schema = json!({"type":"object","additionalProperties":false,"required":["action"],"properties":{
+                    "action":{"type":"string","enum":actions},
+                    "input":{"oneOf":inputs},
+                    "filter":{"type":["string","null"],"description":"Optional jq-compatible output filter."}
+                }});
+                let mut tool = mcp::progressive::tool_definition(
+                    name,
+                    if name == "query" {
+                        "Bounded temporal history, validation, discovery, ping and computed diagnostics."
+                    } else {
+                        "Fixed physical, lifecycle, Thread selection and Matter maintenance commands."
+                    },
+                    schema,
+                );
+                tool.annotations = Some(
+                    json!({"readOnlyHint":name=="query","destructiveHint":name=="execute","idempotentHint":name=="query","openWorldHint":true}),
+                );
+                tools.push(tool);
+            }
+            tools.extend(authoring::tools());
+            Ok(mcp::McpToolList {
+                tools,
+                next_cursor: None,
+            })
+        })
+    }
+    fn call_tool(
+        &self,
+        call: mcp::McpToolCall,
+        context: ServerContext,
+    ) -> mcp::server::BoxFuture<ServerResult<McpToolResult>> {
+        let this = self.clone();
+        Box::pin(async move {
+            if matches!(call.name.as_str(), "create" | "edit") {
+                return this.author(&call.name, &call.arguments, context).await;
+            }
+            let action = call.arguments["action"]
+                .as_str()
+                .ok_or_else(|| ServerError::invalid_params("missing action"))?;
+            for tool in [
+                "home_assistant_query",
+                "home_assistant_exec",
+                "thread_query",
+                "thread_exec",
+                "matter_query",
+                "matter_exec",
+            ] {
+                let private_action = if tool.starts_with("thread_") {
+                    action.strip_prefix("thread.")
+                } else if tool.starts_with("matter_") {
+                    action.strip_prefix("matter.")
+                } else {
+                    Some(action)
+                };
+                if let Some(private_action) = private_action
+                    && public_action(tool, private_action)
+                        .is_some_and(|(name, public)| name == call.name && public == action)
+                {
+                    let mut arguments = call.arguments.clone();
+                    arguments["action"] = json!(private_action);
+                    return this
+                        .0
+                        .call_tool(
+                            mcp::McpToolCall {
+                                name: tool.into(),
+                                arguments,
+                                progress_token: call.progress_token,
+                            },
+                            context,
+                        )
+                        .await;
+                }
+            }
+            Err(ServerError::invalid_params("unknown tool or action"))
+        })
+    }
+    fn list_resources(
+        &self,
+        cursor: Option<String>,
+        context: ServerContext,
+    ) -> mcp::server::BoxFuture<ServerResult<mcp::McpResourceList>> {
+        let this = self.clone();
+        Box::pin(async move {
+            let mut page = this.0.list_resources(cursor, context).await?;
+            let extra = mcp::McpResourceList::parse(&json!({"resources":RESOURCE_CATALOGS.iter().map(|(path,name,_,_,_)| json!({"uri":format!("smarthome://{path}"),"name":name,"mimeType":"application/json"})).collect::<Vec<_>>()})).map_err(|_| ServerError::internal("invalid resource definitions"))?;
+            page.resources.extend(extra.resources);
+            Ok(page)
+        })
+    }
+    fn list_resource_templates(
+        &self,
+        cursor: Option<String>,
+        _: ServerContext,
+    ) -> mcp::server::BoxFuture<ServerResult<mcp::McpResourceTemplateList>> {
+        Box::pin(async move {
+            if cursor.is_some() {
+                return Err(ServerError::invalid_params(
+                    "invalid resource template cursor",
+                ));
+            }
+            let paths = [
+                "entities/{entity_id}",
+                "states/{entity_id}",
+                "devices/{entity_id}",
+                "cameras/{entity_id}",
+                "scenes/{config_key}",
+                "automations/{config_key}",
+                "automations/{config_key}/traces",
+                "blueprints/{path}",
+                "thread/networks/{dataset_id}",
+                "matter/devices/{device_id}",
+            ];
+            mcp::McpResourceTemplateList::parse(&json!({"resourceTemplates":paths.iter().map(|path| json!({"uriTemplate":format!("smarthome://{path}"),"name":path})).collect::<Vec<_>>()})).map_err(|_| ServerError::internal("invalid resource templates"))
+        })
+    }
+    fn read_resource(
+        &self,
+        uri: String,
+        context: ServerContext,
+    ) -> mcp::server::BoxFuture<ServerResult<mcp::McpResourceResult>> {
+        let this = self.clone();
+        Box::pin(async move {
+            if uri.starts_with("skill://") {
+                return this.0.read_resource(uri, context).await;
+            }
+            this.dynamic_resource(&uri, context).await
+        })
+    }
 }
 
 #[mcp::progressive_server(
@@ -1326,8 +1868,13 @@ fn dispatch_exec<'a>(
 
 fn control_result(output: serde_json::Value) -> McpToolResult {
     let action = output["action"].as_str().unwrap_or("control");
+    let text = if action == "smarthome_mcp.deploy" {
+        format!("Completed {action}.")
+    } else {
+        format!("Acknowledged {action}; state, reload completion, and readiness are not verified.")
+    };
     McpToolResult::new(json!({
-        "content": [{"type":"text","text":format!("Completed {action}.")}],
+        "content": [{"type":"text","text":text}],
         "structuredContent": output
     }))
 }
@@ -1361,7 +1908,7 @@ mod tests {
     use axum::{
         Json, Router,
         body::Bytes,
-        extract::{State, WebSocketUpgrade},
+        extract::{State, WebSocketUpgrade, ws},
         response::{IntoResponse as _, Response},
         routing::{get, post as route_post},
     };
@@ -1439,8 +1986,1028 @@ mod tests {
         endpoint_for(url::Url::parse("http://127.0.0.1:1/").unwrap()).await
     }
 
+    async fn resource_endpoint(home_assistant_origin: url::Url) -> (String, JoinHandle<()>) {
+        resource_endpoint_with_timeout(home_assistant_origin, Duration::from_secs(2)).await
+    }
+
+    async fn resource_endpoint_with_timeout(
+        home_assistant_origin: url::Url,
+        timeout: Duration,
+    ) -> (String, JoinHandle<()>) {
+        let client = HomeAssistantClient::for_test(
+            home_assistant_origin,
+            Secret("test-token".into()),
+            timeout,
+        );
+        let handler = Arc::new(ResourceFirstMcp(
+            SmarthomeMcp::new(Arc::new(Services::new(client))).unwrap(),
+        ));
+        let (origin, task) = serve(mcp::server::streamable_http_router(handler)).await;
+        (format!("{origin}/mcp"), task)
+    }
+
+    #[tokio::test]
+    async fn resource_first_discovery_and_dispatch_are_closed() {
+        let (endpoint, task) =
+            resource_endpoint(url::Url::parse("http://127.0.0.1:1/").unwrap()).await;
+        let (_, response) = post(&endpoint, request("tools/list", "tools", json!({}))).await;
+        let tools = response["result"]["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 4);
+        let query = &tools[0];
+        let execute = &tools[1];
+        assert_eq!(query["name"], "query");
+        assert_eq!(execute["name"], "execute");
+        assert_eq!(
+            query["inputSchema"]["properties"]["action"]["enum"]
+                .as_array()
+                .unwrap()
+                .len(),
+            7
+        );
+        assert_eq!(
+            execute["inputSchema"]["properties"]["action"]["enum"]
+                .as_array()
+                .unwrap()
+                .len(),
+            29
+        );
+        for tool in tools {
+            assert_eq!(tool["inputSchema"]["additionalProperties"], false);
+            let schema = tool["inputSchema"].to_string();
+            for forbidden in [
+                "entity.list",
+                "state.get",
+                "blueprint.save",
+                "automation.upsert",
+                "scene.upsert",
+                "automation.from_blueprint",
+            ] {
+                assert!(!schema.contains(forbidden), "{schema}");
+            }
+        }
+        for (name, action, input) in [
+            ("query", "entity.list", json!({})),
+            (
+                "query",
+                "automation.traces",
+                json!({"item_id":"arrival_lights"}),
+            ),
+            (
+                "execute",
+                "scene.upsert",
+                json!({"config_key":"a","config":{}}),
+            ),
+            ("home_assistant_query", "history.get", json!({})),
+            ("edit", "scene.edit", json!({})),
+            ("create", "scene.create", json!({})),
+            ("destroy", "scene.destroy", json!({})),
+            ("execute", "smarthome_mcp.deploy", json!({"confirm":false})),
+            (
+                "execute",
+                "thread.network.set_preferred",
+                json!({"dataset_id":"../unsafe"}),
+            ),
+        ] {
+            let (_, result) = post(
+                &endpoint,
+                request(
+                    "tools/call",
+                    "call",
+                    json!({"name":name,"arguments":{"action":action,"input":input}}),
+                ),
+            )
+            .await;
+            assert!(
+                result.get("error").is_some() || result["result"]["isError"] == true,
+                "{result}"
+            );
+        }
+        let (_, resources) =
+            post(&endpoint, request("resources/list", "resources", json!({}))).await;
+        assert_eq!(
+            resources["result"]["resources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|resource| resource["uri"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("smarthome://"))
+                .count(),
+            7
+        );
+        let (_, templates) = post(
+            &endpoint,
+            request("resources/templates/list", "templates", json!({})),
+        )
+        .await;
+        assert_eq!(
+            templates["result"]["resourceTemplates"]
+                .as_array()
+                .unwrap()
+                .len(),
+            10
+        );
+        task.abort();
+    }
+
+    #[test]
+    fn resource_uris_round_trip_with_strict_canonical_encoding() {
+        for id in [
+            "sensor.allowed",
+            "vendor/motion.yaml",
+            "device #1",
+            "caf\u{e9}",
+        ] {
+            let uri = item_uri("blueprints", id);
+            assert_eq!(
+                decode_item_id(uri.strip_prefix("smarthome://blueprints/").unwrap()).unwrap(),
+                id
+            );
+        }
+        for invalid in ["", "%", "%ZZ", "%FF", "%00", "a\n", &"a".repeat(769)] {
+            assert!(decode_item_id(invalid).is_err());
+        }
+        assert_eq!(
+            item_uri("blueprints", "vendor/motion.yaml"),
+            "smarthome://blueprints/vendor%2Fmotion.yaml"
+        );
+    }
+
+    #[test]
+    fn final_text_resource_bound_includes_escaping_and_metadata() {
+        let uri = "smarthome://devices/sensor.allowed";
+        let empty = mcp::McpResourceResult::text(uri, "application/json", "");
+        let overhead = serde_json::to_vec(&empty.raw).unwrap().len();
+        let at_limit = mcp::McpResourceResult::text(
+            uri,
+            "application/json",
+            "x".repeat(MAX_TEXT_RESOURCE_BYTES - overhead),
+        );
+        assert_eq!(
+            serde_json::to_vec(&at_limit.raw).unwrap().len(),
+            MAX_TEXT_RESOURCE_BYTES
+        );
+        assert!(bounded_text_resource(at_limit.clone()).is_ok());
+        let mut with_metadata = at_limit;
+        with_metadata.raw["contents"][0]["_meta"] = json!({"revision":"extra"});
+        assert!(bounded_text_resource(with_metadata).is_err());
+        assert!(
+            bounded_text_resource(mcp::McpResourceResult::text(
+                uri,
+                "application/json",
+                "x".repeat(MAX_TEXT_RESOURCE_BYTES - overhead + 1),
+            ))
+            .is_err()
+        );
+        let escaped = "\"".repeat(MAX_TEXT_RESOURCE_BYTES / 2);
+        assert!(escaped.len() < MAX_TEXT_RESOURCE_BYTES);
+        assert!(
+            bounded_text_resource(mcp::McpResourceResult::text(
+                uri,
+                "application/json",
+                escaped
+            ))
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn blueprint_catalog_rejects_final_pretty_expansion_without_payload_leak() {
+        let input = json!({"a":{"b":{"c":{"d":{"e":vec![0;100_000]}}}}});
+        assert!(serde_json::to_vec(&input).unwrap().len() < 256 * 1024);
+        let upstream = json!({"vendor/large.yaml":{"metadata":{
+            "domain":"automation","name":"private-size-marker","input":input
+        }}});
+        assert!(serde_json::to_vec(&upstream).unwrap().len() < 1024 * 1024);
+        let response = upstream.clone();
+        let router = Router::new().route("/api/websocket", get(move |upgrade: WebSocketUpgrade| {
+            let response = response.clone();
+            async move { upgrade.on_upgrade(move |mut socket| async move {
+                use axum::extract::ws::Message;
+                use futures_util::StreamExt as _;
+                socket.send(Message::Text(json!({"type":"auth_required"}).to_string().into())).await.unwrap();
+                socket.next().await.unwrap().unwrap();
+                socket.send(Message::Text(json!({"type":"auth_ok"}).to_string().into())).await.unwrap();
+                let Message::Text(command) = socket.next().await.unwrap().unwrap() else { panic!("expected command"); };
+                let command: Value = serde_json::from_str(&command).unwrap();
+                assert_eq!(command["type"], "blueprint/list");
+                socket.send(Message::Text(json!({"id":command["id"],"type":"result","success":true,"result":response}).to_string().into())).await.unwrap();
+            }) }
+        }));
+        let (origin, ha) = serve(router).await;
+        let client = HomeAssistantClient::for_test(
+            url::Url::parse(&origin).unwrap(),
+            Secret("test-token".into()),
+            Duration::from_secs(2),
+        );
+        let query = BlueprintListInput {
+            search: None,
+            limit: Some(100),
+        }
+        .validate()
+        .unwrap();
+        let compact = client.list_blueprints(&query).await.unwrap();
+        assert_eq!(compact["blueprints"].as_array().unwrap().len(), 1);
+        assert!(serde_json::to_vec(&compact).unwrap().len() < MAX_TEXT_RESOURCE_BYTES);
+        assert!(resource_json_text(&compact).unwrap().len() > MAX_TEXT_RESOURCE_BYTES);
+        let (endpoint, task) = resource_endpoint(url::Url::parse(&origin).unwrap()).await;
+        let (_, result, wire_size) = post_with_wire_size(
+            &endpoint,
+            request(
+                "resources/read",
+                "oversize",
+                json!({"uri":"smarthome://blueprints"}),
+            ),
+        )
+        .await;
+        assert!(result.get("error").is_some(), "{result}");
+        assert!(result.get("result").is_none());
+        assert!(wire_size < 8 * 1024);
+        assert!(!result.to_string().contains("private-size-marker"));
+        assert!(!result.to_string().contains("large.yaml"));
+        task.abort();
+        ha.abort();
+    }
+
+    #[tokio::test]
+    async fn resource_first_reads_linked_entities_camera_and_immutable_skills() {
+        let (ha_origin, ha) = home_assistant().await;
+        let (endpoint, task) = resource_endpoint(ha_origin).await;
+        for (name, action, input) in [
+            (
+                "query",
+                "automation.validate",
+                json!({"triggers":[],"actions":[]}),
+            ),
+            ("query", "matter.readiness.get", json!({})),
+            (
+                "execute",
+                "light.turn_on",
+                json!({"entity_id":"light.kitchen"}),
+            ),
+            (
+                "execute",
+                "thread.network.set_preferred",
+                json!({"dataset_id":"dataset-a"}),
+            ),
+        ] {
+            let (_, result) = post(
+                &endpoint,
+                request(
+                    "tools/call",
+                    "dispatch",
+                    json!({"name":name,"arguments":{"action":action,"input":input}}),
+                ),
+            )
+            .await;
+            assert!(
+                result.get("error").is_none() && result["result"]["isError"] != true,
+                "{action}: {result}"
+            );
+            assert!(!result.to_string().contains("must-not-leak"));
+        }
+        let (_, catalog) = post(
+            &endpoint,
+            request(
+                "resources/read",
+                "catalog",
+                json!({"uri":"smarthome://entities"}),
+            ),
+        )
+        .await;
+        let value: Value =
+            serde_json::from_str(catalog["result"]["contents"][0]["text"].as_str().unwrap())
+                .unwrap();
+        assert_eq!(
+            value["entities"][0]["uri"],
+            "smarthome://entities/sensor.allowed"
+        );
+        assert_eq!(
+            value["entities"][0]["state_uri"],
+            "smarthome://states/sensor.allowed"
+        );
+        let (_, state) = post(
+            &endpoint,
+            request(
+                "resources/read",
+                "state",
+                json!({"uri":"smarthome://states/sensor.allowed"}),
+            ),
+        )
+        .await;
+        assert!(
+            state["result"]["contents"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("sensor.allowed")
+        );
+        let (_, camera) = post(
+            &endpoint,
+            request(
+                "resources/read",
+                "camera",
+                json!({"uri":"smarthome://cameras/camera.front_door"}),
+            ),
+        )
+        .await;
+        assert_eq!(camera["result"]["contents"][0]["mimeType"], "image/png");
+        assert_eq!(
+            STANDARD
+                .decode(camera["result"]["contents"][0]["blob"].as_str().unwrap())
+                .unwrap(),
+            b"\x89PNG\r\n\x1a\nframe"
+        );
+        let (_, skill) = post(
+            &endpoint,
+            request(
+                "resources/read",
+                "skill",
+                json!({"uri":"skill://smarthome/inspect-home/SKILL.md"}),
+            ),
+        )
+        .await;
+        assert!(
+            skill["result"]["contents"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("Inspect Home")
+        );
+        for uri in [
+            "smarthome://states/sensor.foreign",
+            "smarthome://states/%73ensor.allowed",
+            "smarthome://states/sensor.allowed?filter=x",
+            "smarthome://blueprints/../unsafe.yaml",
+            "smarthome://unknown",
+            "https://example.com/",
+        ] {
+            let (_, result) = post(
+                &endpoint,
+                request("resources/read", "invalid", json!({"uri":uri})),
+            )
+            .await;
+            assert!(result.get("error").is_some(), "{uri}: {result}");
+        }
+        task.abort();
+        ha.abort();
+    }
+
+    #[tokio::test]
+    async fn resource_first_config_reads_use_native_admin_boundary_and_digest_text() {
+        let present = Arc::new(AtomicBool::new(true));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let states_present = present.clone();
+        let config_reads = reads.clone();
+        let router = Router::new()
+            .route("/api/states", get(move || {
+                let present = states_present.clone();
+                async move { Json(if present.load(Ordering::Relaxed) { json!([{"entity_id":"scene.evening","attributes":{"id":"evening_scene","friendly_name":"Evening"}}]) } else { json!([]) }) }
+            }))
+            .route("/api/config/scene/config/evening_scene", get(move || {
+                let reads = config_reads.clone();
+                async move { reads.fetch_add(1, Ordering::Relaxed); Json(json!({"name":"Evening","id":"evening_scene"})) }
+            }));
+        let (origin, ha) = serve(router).await;
+        let (endpoint, task) = resource_endpoint(url::Url::parse(&origin).unwrap()).await;
+        let (_, result) = post(
+            &endpoint,
+            request(
+                "resources/read",
+                "config",
+                json!({"uri":"smarthome://scenes/evening_scene"}),
+            ),
+        )
+        .await;
+        let content = &result["result"]["contents"][0];
+        let text = content["text"].as_str().unwrap();
+        assert_eq!(
+            text,
+            "{\n  \"id\": \"evening_scene\",\n  \"name\": \"Evening\"\n}"
+        );
+        use sha2::{Digest as _, Sha256};
+        let digest = Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        assert_eq!(content["_meta"]["revision"], format!("sha256:{digest}"));
+        assert_eq!(content["_meta"]["editable"], true);
+        assert_eq!(content["_meta"]["concurrency"], "single-writer");
+        present.store(false, Ordering::Relaxed);
+        let (_, removed) = post(
+            &endpoint,
+            request(
+                "resources/read",
+                "removed",
+                json!({"uri":"smarthome://scenes/evening_scene"}),
+            ),
+        )
+        .await;
+        assert!(removed.get("error").is_none());
+        assert_eq!(reads.load(Ordering::Relaxed), 2);
+        task.abort();
+        ha.abort();
+    }
+
     async fn endpoint_for(home_assistant_origin: url::Url) -> (String, JoinHandle<()>) {
         endpoint_for_with_timeout(home_assistant_origin, Duration::from_millis(100)).await
+    }
+
+    #[tokio::test]
+    async fn native_authoring_http_roundtrip_without_component_bridge() {
+        let config = Arc::new(Mutex::new(Some(
+            json!({"id":"evening_scene","name":"Evening"}),
+        )));
+        let writes = Arc::new(AtomicUsize::new(0));
+        let get_config = config.clone();
+        let put_config = config.clone();
+        let put_writes = writes.clone();
+        let router = Router::new().route(
+            "/api/config/scene/config/evening_scene",
+            get(move || {
+                let config = get_config.clone();
+                async move {
+                    match config.lock().unwrap().clone() {
+                        Some(config) => (StatusCode::OK, Json(config)),
+                        None => (StatusCode::NOT_FOUND, Json(json!({}))),
+                    }
+                }
+            })
+            .post(move |Json(value): Json<serde_json::Value>| {
+                let config = put_config.clone();
+                let writes = put_writes.clone();
+                async move {
+                    *config.lock().unwrap() = Some(value);
+                    writes.fetch_add(1, Ordering::Relaxed);
+                    Json(json!({"result":"ok"}))
+                }
+            }),
+        );
+        let (origin, ha) = serve(router).await;
+        let (endpoint, task) = resource_endpoint(url::Url::parse(&origin).unwrap()).await;
+        let (_, discovery) = post(&endpoint, request("tools/list", "list", json!({}))).await;
+        assert_eq!(
+            discovery["result"]["tools"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|t| t["name"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["query", "execute", "create", "edit"]
+        );
+        let (_, read) = post(
+            &endpoint,
+            request(
+                "resources/read",
+                "read",
+                json!({"uri":"smarthome://scenes/evening_scene"}),
+            ),
+        )
+        .await;
+        let item = &read["result"]["contents"][0];
+        assert_eq!(item["_meta"]["editable"], true);
+        assert_eq!(item["_meta"]["revision_check"], "best-effort");
+        let args = json!({"uri":"smarthome://scenes/evening_scene","expected_revision":item["_meta"]["revision"],"edits":[{"operation":"replace","old_text":"Evening","new_text":"Night"},{"operation":"insert","placement":"after","anchor":"Night","text":"!"}]});
+        let (_, edited) = post(
+            &endpoint,
+            request(
+                "tools/call",
+                "edit",
+                json!({"name":"edit","arguments":args}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            edited["result"]["structuredContent"]["accepted"], true,
+            "{edited}"
+        );
+        assert_eq!(config.lock().unwrap().as_ref().unwrap()["name"], "Night!");
+        let (_, conflict) = post(
+            &endpoint,
+            request(
+                "tools/call",
+                "edit",
+                json!({"name":"edit","arguments":args}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            conflict["result"]["structuredContent"]["error"]["code"],
+            "revision_conflict"
+        );
+        assert_eq!(writes.load(Ordering::Relaxed), 1);
+        let create = json!({"name":"create","arguments":{"action":"scene.create","input":{"config_key":"evening_scene","text":"{\"id\":\"evening_scene\"}"}}});
+        let (_, exists) = post(&endpoint, request("tools/call", "exists", create.clone())).await;
+        assert_eq!(
+            exists["result"]["structuredContent"]["error"]["code"],
+            "already_exists"
+        );
+        *config.lock().unwrap() = None;
+        let (_, created) = post(&endpoint, request("tools/call", "create", create)).await;
+        assert_eq!(created["result"]["structuredContent"]["accepted"], true);
+        assert_eq!(writes.load(Ordering::Relaxed), 2);
+        task.abort();
+        ha.abort();
+    }
+
+    #[tokio::test]
+    async fn native_authoring_rejects_invalid_candidates_before_writing() {
+        let writes = Arc::new(AtomicUsize::new(0));
+        let put_writes = writes.clone();
+        let router = Router::new().route(
+            "/api/config/scene/config/x",
+            get(|| async { Json(json!({"id":"x","name":"one"})) }).post(move || {
+                let writes = put_writes.clone();
+                async move {
+                    writes.fetch_add(1, Ordering::Relaxed);
+                    Json(json!({"result":"ok"}))
+                }
+            }),
+        );
+        let (origin, ha) = serve(router).await;
+        let (endpoint, task) = resource_endpoint(url::Url::parse(&origin).unwrap()).await;
+        let (_, read) = post(
+            &endpoint,
+            request(
+                "resources/read",
+                "read",
+                json!({"uri":"smarthome://scenes/x"}),
+            ),
+        )
+        .await;
+        let revision = read["result"]["contents"][0]["_meta"]["revision"].clone();
+        for edits in [
+            vec![json!({"operation":"insert","placement":"start","text":" ","anchor":null})],
+            vec![json!({"operation":"replace","old_text":"one","new_text":"two","unknown":true})],
+            vec![
+                json!({"operation":"replace","old_text":"one","new_text":"two"}),
+                json!({"operation":"replace","old_text":"missing","new_text":"private"}),
+            ],
+            vec![json!({"operation":"replace","old_text":"one","new_text":"one"})],
+            vec![json!({"operation":"insert","placement":"start","text":" "})],
+            vec![json!({"operation":"replace","old_text":"\"x\"","new_text":"\"wrong\""})],
+            vec![json!({"operation":"insert","placement":"start","text":"private invalid source"})],
+            vec![json!({"operation":"insert","placement":"end","text":"x".repeat(256*1024)})],
+        ] {
+            let (_, result) = post(&endpoint, request("tools/call","invalid",json!({"name":"edit","arguments":{"uri":"smarthome://scenes/x","expected_revision":revision,"edits":edits}}))).await;
+            assert!(
+                result.get("error").is_some() || result["result"]["isError"] == true,
+                "{result}"
+            );
+            assert!(!result.to_string().contains("private"));
+            assert_eq!(writes.load(Ordering::Relaxed), 0);
+        }
+        task.abort();
+        ha.abort();
+    }
+
+    #[tokio::test]
+    async fn native_authoring_preflight_errors_and_reread_conflicts_never_write() {
+        for mode in ["error", "edit_race", "create_race"] {
+            let reads = Arc::new(AtomicUsize::new(0));
+            let writes = Arc::new(AtomicUsize::new(0));
+            let get_reads = reads.clone();
+            let put_writes = writes.clone();
+            let router = Router::new().route(
+                "/api/config/scene/config/x",
+                get(move || {
+                    let reads = get_reads.clone();
+                    async move {
+                        let index = reads.fetch_add(1, Ordering::Relaxed);
+                        if mode == "error" {
+                            (
+                                StatusCode::INTERNAL_SERVER_ERROR,
+                                Json(json!({"secret":"private"})),
+                            )
+                        } else if mode == "create_race" && index == 0 {
+                            (StatusCode::NOT_FOUND, Json(json!({})))
+                        } else {
+                            (
+                                StatusCode::OK,
+                                Json(
+                                    json!({"id":"x","name":if index == 0 { "one" } else { "two" }}),
+                                ),
+                            )
+                        }
+                    }
+                })
+                .post(move || {
+                    let writes = put_writes.clone();
+                    async move {
+                        writes.fetch_add(1, Ordering::Relaxed);
+                        Json(json!({"result":"ok"}))
+                    }
+                }),
+            );
+            let (origin, ha) = serve(router).await;
+            let (endpoint, task) = resource_endpoint(url::Url::parse(&origin).unwrap()).await;
+            let arguments = if mode == "edit_race" {
+                let (_, read) = post(
+                    &endpoint,
+                    request(
+                        "resources/read",
+                        "read",
+                        json!({"uri":"smarthome://scenes/x"}),
+                    ),
+                )
+                .await;
+                reads.store(0, Ordering::Relaxed);
+                json!({"name":"edit","arguments":{"uri":"smarthome://scenes/x","expected_revision":read["result"]["contents"][0]["_meta"]["revision"],"edits":[{"operation":"replace","old_text":"one","new_text":"three"}]}})
+            } else {
+                json!({"name":"create","arguments":{"action":"scene.create","input":{"config_key":"x","text":"{\"id\":\"x\"}"}}})
+            };
+            let (_, result) = post(&endpoint, request("tools/call", "call", arguments)).await;
+            assert_eq!(result["result"]["isError"], true, "{mode}: {result}");
+            assert_eq!(writes.load(Ordering::Relaxed), 0);
+            assert!(!result.to_string().contains("private"));
+            if mode == "edit_race" {
+                assert_eq!(
+                    result["result"]["structuredContent"]["error"]["code"],
+                    "revision_conflict"
+                );
+            }
+            task.abort();
+            ha.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn native_authoring_uncertain_ack_is_nonretryable_and_never_repeated() {
+        for slow in [false, true] {
+            let writes = Arc::new(AtomicUsize::new(0));
+            let put_writes = writes.clone();
+            let router = Router::new().route(
+                "/api/config/scene/config/x",
+                get(|| async { StatusCode::NOT_FOUND }).post(move || {
+                    let writes = put_writes.clone();
+                    async move {
+                        writes.fetch_add(1, Ordering::Relaxed);
+                        if slow {
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                        }
+                        Json(json!({"private":"invalid ack"}))
+                    }
+                }),
+            );
+            let (origin, ha) = serve(router).await;
+            let (endpoint, task) = resource_endpoint_with_timeout(
+                url::Url::parse(&origin).unwrap(),
+                Duration::from_millis(100),
+            )
+            .await;
+            let (_, result) = post(&endpoint,request("tools/call","create",json!({"name":"create","arguments":{"action":"scene.create","input":{"config_key":"x","text":"{\"id\":\"x\"}"}}}))).await;
+            let error = &result["result"]["structuredContent"]["error"];
+            assert_eq!(error["code"], "mutation_outcome_unknown", "{result}");
+            assert_eq!(error["retryable"], false);
+            assert!(!result.to_string().contains("private"));
+            assert_eq!(writes.load(Ordering::Relaxed), 1);
+            task.abort();
+            ha.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn blueprint_authoring_roundtrips_reader_text_and_uses_only_native_save() {
+        let native = Arc::new(Mutex::new(Some(
+            "blueprint:\n  name: One\n  domain: automation\naction:\n  target: !input chosen_entity\n".to_owned(),
+        )));
+        let commands = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let ws_native = native.clone();
+        let ws_commands = commands.clone();
+        let router = Router::new().route("/api/websocket", get(move |upgrade: WebSocketUpgrade| {
+            let native = ws_native.clone(); let commands = ws_commands.clone(); async move {
+                upgrade.on_upgrade(move |mut socket| async move {
+                    socket.send(ws::Message::Text(json!({"type":"auth_required"}).to_string().into())).await.unwrap();
+                    socket.recv().await.unwrap().unwrap();
+                    socket.send(ws::Message::Text(json!({"type":"auth_ok"}).to_string().into())).await.unwrap();
+                    while let Some(Ok(message)) = socket.recv().await {
+                        let Ok(message) = message.into_text() else { break; };
+                        let command: Value = serde_json::from_str(&message).unwrap();
+                        commands.lock().unwrap().push(command.clone());
+                        if command["type"] == "blueprint/save" && command["yaml"].as_str().is_some_and(|yaml| yaml.contains("unknown_native_schema")) {
+                            socket.send(ws::Message::Text(json!({"id":command["id"],"type":"result","success":false,"error":{"code":"invalid_format","message":"private native schema details"}}).to_string().into())).await.unwrap();
+                            continue;
+                        }
+                        let result = match command["type"].as_str().unwrap() {
+                            "smarthome_mcp/blueprint/get" => json!({"path":"local/test.yaml","yaml":native.lock().unwrap().as_ref().unwrap()}),
+                            "blueprint/list" => if native.lock().unwrap().is_some() { json!({"local/test.yaml":{"metadata":{"name":"One"}}}) } else { json!({}) },
+                            "blueprint/save" => {
+                                let previous = native.lock().unwrap().is_some();
+                                assert!(command["allow_override"] == true || !previous);
+                                *native.lock().unwrap() = Some(command["yaml"].as_str().unwrap().to_owned());
+                                json!({"overrides_existing":previous})
+                            }
+                            other => panic!("unexpected native command: {other}"),
+                        };
+                        if socket.send(ws::Message::Text(json!({"id":command["id"],"type":"result","success":true,"result":result}).to_string().into())).await.is_err() { break; }
+                    }
+                })
+            }
+        }));
+        let (origin, ha) = serve(router).await;
+        let (endpoint, task) = resource_endpoint(url::Url::parse(&origin).unwrap()).await;
+        let uri = "smarthome://blueprints/local%2Ftest.yaml";
+        let (_, read) = post(
+            &endpoint,
+            request("resources/read", "read", json!({"uri":uri})),
+        )
+        .await;
+        assert_eq!(
+            read["result"]["contents"][0]["text"],
+            native.lock().unwrap().as_ref().unwrap().as_str(),
+            "{read}"
+        );
+        let original = native.lock().unwrap().as_ref().unwrap().clone();
+        for replacement in [
+            format!("# private comment\n{original}"),
+            "action: {target: !input chosen_entity}\nblueprint: {domain: automation, name: One}\n"
+                .to_owned(),
+            "blueprint: [private broken".to_owned(),
+            "[private, sequence]".to_owned(),
+            "---\nblueprint: {}\n---\nprivate: true\n".to_owned(),
+            "blueprint: {}\nblueprint: {}\n".to_owned(),
+            "blueprint:\n  name: One\n  name: Two\n".to_owned(),
+        ] {
+            let before = commands.lock().unwrap().len();
+            let (_, invalid) = post(&endpoint,request("tools/call","invalid-yaml",json!({"name":"edit","arguments":{"uri":uri,"expected_revision":read["result"]["contents"][0]["_meta"]["revision"],"edits":[{"operation":"replace","old_text":original,"new_text":replacement}]}}))).await;
+            assert!(invalid.get("error").is_some(), "{invalid}");
+            assert!(!invalid.to_string().contains("private"));
+            let calls = commands.lock().unwrap();
+            assert_eq!(calls.len(), before + 1);
+            assert_eq!(calls.last().unwrap()["type"], "smarthome_mcp/blueprint/get");
+            assert!(!calls.iter().any(|call| call["type"] == "blueprint/save"));
+            assert_eq!(native.lock().unwrap().as_ref().unwrap(), &original);
+        }
+        let (_, edited) = post(&endpoint,request("tools/call","edit",json!({"name":"edit","arguments":{"uri":uri,"expected_revision":read["result"]["contents"][0]["_meta"]["revision"],"edits":[{"operation":"replace","old_text":"One","new_text":"Two"}]}}))).await;
+        assert_eq!(
+            edited["result"]["structuredContent"]["accepted"], true,
+            "{edited}"
+        );
+        assert!(native.lock().unwrap().as_ref().unwrap().contains("Two"));
+        assert!(
+            native
+                .lock()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .contains("!input chosen_entity")
+        );
+        let create = json!({"name":"create","arguments":{"action":"blueprint.create","input":{"path":"local/test.yaml","text":"blueprint:\n  name: Three\n  domain: automation\n"}}});
+        let (_, exists) = post(&endpoint, request("tools/call", "exists", create.clone())).await;
+        assert_eq!(
+            exists["result"]["structuredContent"]["error"]["code"],
+            "already_exists"
+        );
+        *native.lock().unwrap() = None;
+        for source in [
+            "blueprint: [private broken",
+            "[sequence]",
+            "---\na: 1\n---\nb: 2\n",
+            "a: 1\na: 2\n",
+        ] {
+            let before = commands.lock().unwrap().len();
+            let (_, invalid) = post(&endpoint,request("tools/call","invalid-create",json!({"name":"create","arguments":{"action":"blueprint.create","input":{"path":"local/test.yaml","text":source}}}))).await;
+            assert!(invalid.get("error").is_some(), "{invalid}");
+            assert!(!invalid.to_string().contains("private"));
+            let calls = commands.lock().unwrap();
+            assert_eq!(calls.len(), before + 1);
+            assert_eq!(calls.last().unwrap()["type"], "blueprint/list");
+            assert_eq!(
+                calls
+                    .iter()
+                    .filter(|call| call["type"] == "blueprint/save")
+                    .count(),
+                1
+            );
+        }
+        let (_, created) = post(&endpoint, request("tools/call", "create", create)).await;
+        assert_eq!(
+            created["result"]["structuredContent"]["accepted"], true,
+            "{created}"
+        );
+        *native.lock().unwrap() = None;
+        let (_, rejected) = post(&endpoint,request("tools/call","native-schema",json!({"name":"create","arguments":{"action":"blueprint.create","input":{"path":"local/test.yaml","text":"unknown_native_schema: true\n"}}}))).await;
+        assert_eq!(
+            rejected["result"]["structuredContent"]["error"]["code"], "request_rejected",
+            "{rejected}"
+        );
+        assert_eq!(
+            rejected["result"]["structuredContent"]["error"]["retryable"],
+            false
+        );
+        assert!(!rejected.to_string().contains("private"));
+        assert!(native.lock().unwrap().is_none());
+        let calls = commands.lock().unwrap();
+        let saves = calls
+            .iter()
+            .filter(|call| call["type"] == "blueprint/save")
+            .collect::<Vec<_>>();
+        assert_eq!(saves.len(), 3);
+        assert_eq!(saves[0]["allow_override"], true);
+        assert_eq!(saves[1]["allow_override"], false);
+        assert_eq!(saves[2]["allow_override"], false);
+        for call in saves {
+            assert_eq!(call["path"], "local/test.yaml");
+            assert_eq!(call["domain"], "automation");
+        }
+        task.abort();
+        ha.abort();
+    }
+
+    #[tokio::test]
+    async fn blueprint_authoring_native_error_outcomes_and_creation_preflights() {
+        for operation in ["create", "edit"] {
+            for mode in [
+                "unknown",
+                "missing_code",
+                "invalid_code",
+                "missing_error",
+                "invalid_error",
+                "invalid_message",
+                "malformed_ack",
+                "lost_ack",
+                "invalid_format",
+                "already_exists",
+                "invalid_existing",
+                "list_error",
+                "list_race",
+            ] {
+                if operation == "edit"
+                    && matches!(mode, "invalid_existing" | "list_error" | "list_race")
+                {
+                    continue;
+                }
+                let commands = Arc::new(Mutex::new(Vec::<Value>::new()));
+                let list_reads = Arc::new(AtomicUsize::new(0));
+                let ws_commands = commands.clone();
+                let ws_reads = list_reads.clone();
+                let router = Router::new().route("/api/websocket",get(move |upgrade: WebSocketUpgrade| {
+                    let commands = ws_commands.clone(); let reads = ws_reads.clone(); async move {
+                        upgrade.on_upgrade(move |mut socket| async move {
+                            socket.send(ws::Message::Text(json!({"type":"auth_required"}).to_string().into())).await.unwrap();
+                            socket.recv().await.unwrap().unwrap();
+                            socket.send(ws::Message::Text(json!({"type":"auth_ok"}).to_string().into())).await.unwrap();
+                            while let Some(Ok(message)) = socket.recv().await {
+                                let Ok(message) = message.into_text() else { break; };
+                                let command: Value = serde_json::from_str(&message).unwrap();
+                                commands.lock().unwrap().push(command.clone());
+                                let mut response = json!({"id":command["id"],"type":"result","success":true});
+                                match command["type"].as_str().unwrap() {
+                                    "smarthome_mcp/blueprint/get" => response["result"] = json!({"path":"local/test.yaml","yaml":"blueprint:\n  name: One\n  domain: automation\n"}),
+                                    "blueprint/list" => {
+                                        let index = reads.fetch_add(1,Ordering::Relaxed);
+                                        if mode == "list_error" { response["success"] = json!(false); response["error"] = json!({"code":"unknown_error","message":"private list token"}); }
+                                        else if mode == "invalid_existing" || (mode == "list_race" && index > 0) { response["result"] = json!({"local/test.yaml":{"error":"private invalid blueprint"}}); }
+                                        else { response["result"] = json!({}); }
+                                    }
+                                    "blueprint/save" => {
+                                        if mode == "lost_ack" { socket.send(ws::Message::Close(None)).await.unwrap(); break; }
+                                        if mode == "malformed_ack" { response["result"] = json!({"overrides_existing":"private invalid ack"}); }
+                                        else {
+                                            response["success"] = json!(false);
+                                            let error = match mode {
+                                                "unknown" => json!({"code":"unknown_error","message":"private native token"}),
+                                                "missing_code" => json!({"message":"private native token"}),
+                                                "invalid_code" => json!({"code":17,"message":"private native token"}),
+                                                "invalid_error" => json!("private malformed error"),
+                                                "invalid_message" => json!({"code":"invalid_format","message":17}),
+                                                "invalid_format" | "already_exists" => json!({"code":mode,"message":"private native token"}),
+                                                "missing_error" => Value::Null,
+                                                other => panic!("unexpected save mode {other}"),
+                                            };
+                                            if mode != "missing_error" { response["error"] = error; }
+                                        }
+                                    }
+                                    other => panic!("unexpected native command {other}"),
+                                }
+                                if socket.send(ws::Message::Text(response.to_string().into())).await.is_err() { break; }
+                            }
+                        })
+                    }
+                }));
+                let (origin, ha) = serve(router).await;
+                let (endpoint, task) = resource_endpoint(url::Url::parse(&origin).unwrap()).await;
+                let arguments = if operation == "create" {
+                    json!({"name":"create","arguments":{"action":"blueprint.create","input":{"path":"local/test.yaml","text":"blueprint:\n  name: Two\n  domain: automation\n"}}})
+                } else {
+                    let (_, read) = post(
+                        &endpoint,
+                        request(
+                            "resources/read",
+                            "read",
+                            json!({"uri":"smarthome://blueprints/local%2Ftest.yaml"}),
+                        ),
+                    )
+                    .await;
+                    json!({"name":"edit","arguments":{"uri":"smarthome://blueprints/local%2Ftest.yaml","expected_revision":read["result"]["contents"][0]["_meta"]["revision"],"edits":[{"operation":"replace","old_text":"One","new_text":"Two"}]}})
+                };
+                let (_, result) = post(&endpoint, request("tools/call", "author", arguments)).await;
+                let error = &result["result"]["structuredContent"]["error"];
+                assert_eq!(
+                    result["result"]["isError"], true,
+                    "{operation}/{mode}: {result}"
+                );
+                assert!(!result.to_string().contains("private"), "{result}");
+                let expected_saves =
+                    if matches!(mode, "invalid_existing" | "list_error" | "list_race") {
+                        0
+                    } else {
+                        1
+                    };
+                assert_eq!(
+                    commands
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|command| command["type"] == "blueprint/save")
+                        .count(),
+                    expected_saves,
+                    "{operation}/{mode}"
+                );
+                match mode {
+                    "invalid_existing" | "list_race" => assert_eq!(error["code"], "already_exists"),
+                    "list_error" => {}
+                    "invalid_format" | "already_exists" => {
+                        assert_eq!(error["code"], "request_rejected");
+                        assert_eq!(error["retryable"], false);
+                    }
+                    _ => {
+                        assert_eq!(
+                            error["code"], "mutation_outcome_unknown",
+                            "{operation}/{mode}: {result}"
+                        );
+                        assert_eq!(error["retryable"], false);
+                    }
+                }
+                task.abort();
+                ha.abort();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn native_authoring_cancellation_never_retries_and_releases_capacity() {
+        let mock = CancellationMock {
+            calls: Arc::new(AtomicUsize::new(0)),
+            started: Arc::new(Notify::new()),
+            dropped: Arc::new(AtomicBool::new(false)),
+            dropped_notify: Arc::new(Notify::new()),
+            bodies: Arc::new(Mutex::new(Vec::new())),
+        };
+        let router = Router::new()
+            .route(
+                "/api/config/scene/config/cancel_private_key",
+                get(|| async { StatusCode::NOT_FOUND }).post(delayed_config_upsert),
+            )
+            .with_state(mock.clone());
+        let (origin, ha) = serve(router).await;
+        let client = HomeAssistantClient::for_test(
+            url::Url::parse(&origin).unwrap(),
+            Secret("test-token".into()),
+            Duration::from_secs(10),
+        );
+        let handler = Arc::new(ResourceFirstMcp(
+            SmarthomeMcp::new(Arc::new(Services::new(client.clone()))).unwrap(),
+        ));
+        let (mut input_writer, input_reader) = tokio::io::duplex(64 * 1024);
+        let (output_reader, output_writer) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(mcp::server::serve_stream(
+            handler,
+            input_reader,
+            output_writer,
+        ));
+        let started = mock.started.notified();
+        let call = request(
+            "tools/call",
+            "cancel-native",
+            json!({"name":"create","arguments":{"action":"scene.create","input":{"config_key":"cancel_private_key","text":"{\"id\":\"cancel_private_key\",\"secret\":\"private-source\"}"}}}),
+        );
+        input_writer
+            .write_all(format!("{call}\n").as_bytes())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), started)
+            .await
+            .unwrap();
+        let mut cancel = request(
+            "notifications/cancelled",
+            "unused",
+            json!({"requestId":"cancel-native","reason":"caller stopped"}),
+        );
+        cancel.as_object_mut().unwrap().remove("id");
+        let dropped = mock.dropped_notify.notified();
+        input_writer
+            .write_all(format!("{cancel}\n").as_bytes())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), dropped)
+            .await
+            .unwrap();
+        assert_eq!(mock.calls.load(Ordering::Relaxed), 1);
+        assert!(client.has_full_test_capacity());
+        drop(output_reader);
+        drop(input_writer);
+        server.abort();
+        ha.abort();
     }
 
     async fn endpoint_for_with_timeout(
@@ -1484,6 +3051,10 @@ mod tests {
         let camera = Bytes::from(camera);
         let router = Router::new()
             .route("/api/websocket", get(mock_websocket))
+            .route("/api/states/sensor.allowed", get(|| async { Json(json!({
+                "entity_id":"sensor.allowed","state":"1","attributes":{},
+                "last_changed":"2026-08-10T00:00:00Z","last_updated":"2026-08-10T00:00:00Z"
+            })) }))
             .route(
                 "/api/camera_proxy/camera.front_door",
                 get(move || {
@@ -1550,6 +3121,7 @@ mod tests {
                     }),
                     "config/entity_registry/get_entries" => json!({"sensor.allowed":null}),
                     "config/device_registry/list" | "config/area_registry/list" => json!([]),
+                    "thread/set_preferred_dataset" | "thread/set_preferred_border_agent" => json!({}),
                     "validate_config" => json!({
                         "triggers":{"valid":true,"error":null},
                         "actions":{"valid":false,"error":"must-not-leak-validation-error"}
@@ -2425,12 +3997,15 @@ mod tests {
     async fn hosted_skill_methods_keep_bearer_scope_and_origin_protection() {
         use mcp::server::{McpHostedTokenValidation, McpTokenAuthorization};
 
+        let (ha_origin, ha) = home_assistant().await;
         let client = HomeAssistantClient::for_test(
-            url::Url::parse("http://127.0.0.1:1/").unwrap(),
+            ha_origin,
             Secret("test-token".to_owned()),
             Duration::from_millis(100),
         );
-        let handler = Arc::new(SmarthomeMcp::new(Arc::new(Services::new(client))).unwrap());
+        let handler = Arc::new(ResourceFirstMcp(
+            SmarthomeMcp::new(Arc::new(Services::new(client))).unwrap(),
+        ));
         let metadata = McpProtectedResourceMetadata::new(
             "https://mcp.example/mcp",
             ["https://mcp.example/oauth"],
@@ -2479,6 +4054,8 @@ mod tests {
                 "resources/read",
                 json!({"uri":"skill://smarthome/inspect-home/references/queries.md"}),
             ),
+            ("resources/list", json!({})),
+            ("resources/read", json!({"uri":"smarthome://entities"})),
         ] {
             for (token, request_origin, expected, error) in [
                 (None, None, StatusCode::UNAUTHORIZED, None),
@@ -2540,12 +4117,21 @@ mod tests {
                     }
                 }
                 if expected == StatusCode::OK {
-                    assert!(response.text().await.unwrap().contains("inspect-home"));
+                    let expected_text = if params["uri"] == "smarthome://entities" {
+                        "sensor.allowed"
+                    } else if method == "resources/list" {
+                        "smarthome://entities"
+                    } else {
+                        "inspect-home"
+                    };
+                    let body = response.text().await.unwrap();
+                    assert!(body.contains(expected_text), "{method}: {body}");
                 }
             }
         }
         assert!(calls.load(Ordering::Relaxed) >= 9);
         task.abort();
+        ha.abort();
     }
 
     #[tokio::test]

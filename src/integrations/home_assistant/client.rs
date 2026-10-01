@@ -1013,6 +1013,77 @@ impl HomeAssistantClient {
         self.fixed_websocket_ack("blueprint.save", json!({"id":1,"type":BLUEPRINT_SAVE,"domain":"automation","path":command.path,"yaml":command.yaml,"allow_override":true}), json!({"action":"blueprint.save","accepted":true})).await
     }
 
+    pub(crate) async fn save_blueprint_authoring(
+        &self,
+        command: &BlueprintSave,
+        allow_override: bool,
+    ) -> Result<Value, Error> {
+        let _permit = self.admit()?;
+        let action = "blueprint.save";
+        let mut metrics = MetricsGuard::new(action);
+        let span = operation_span("home_assistant.exec", action);
+        let result = tokio::time::timeout(self.timeout, async {
+            let mut socket = self.open_websocket().await?;
+            let ack = self
+                .blueprint_save_response(&mut socket, command, allow_override)
+                .await?;
+            if !ack["overrides_existing"].is_boolean()
+                || (!allow_override && ack["overrides_existing"] != false)
+            {
+                return Err(Error::InvalidResponse);
+            }
+            bounded_output(json!({"accepted":true}))
+        })
+        .instrument(span.clone())
+        .await
+        .unwrap_or(Err(Error::Timeout));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
+    pub(crate) async fn blueprint_absence(&self, path: &str) -> Result<bool, Error> {
+        let raw = self
+            .fixed_websocket_query(
+                "blueprint.list",
+                json!({"id":1,"type":BLUEPRINT_LIST,"domain":"automation"}),
+            )
+            .await?;
+        let entries = raw.as_object().ok_or(Error::InvalidResponse)?;
+        if entries.len() > 1_000 {
+            return Err(Error::ResponseTooLarge);
+        }
+        Ok(!entries.contains_key(path))
+    }
+
+    async fn blueprint_save_response(
+        &self,
+        socket: &mut HomeAssistantSocket,
+        command: &BlueprintSave,
+        allow_override: bool,
+    ) -> Result<Value, Error> {
+        socket.send(Message::Text(json!({"id":1,"type":BLUEPRINT_SAVE,"domain":"automation","path":command.path,"yaml":command.yaml,"allow_override":allow_override}).to_string().into())).await.map_err(|_| Error::UpstreamUnavailable)?;
+        let response = websocket_json(socket).await?;
+        if response["id"].as_u64() != Some(1) || response["type"] != "result" {
+            return Err(Error::InvalidResponse);
+        }
+        match response["success"].as_bool() {
+            Some(true) if response.get("error").is_none() => response
+                .get("result")
+                .cloned()
+                .ok_or(Error::InvalidResponse),
+            Some(false)
+                if response.get("result").is_none() && response["error"]["message"].is_string() =>
+            {
+                // Core 2026.9.3 rejects these before persistence; unknown_error can follow a partial write.
+                match response["error"]["code"].as_str() {
+                    Some("invalid_format" | "already_exists") => Err(Error::RequestRejected),
+                    _ => Err(Error::InvalidResponse),
+                }
+            }
+            _ => Err(Error::InvalidResponse),
+        }
+    }
+
     pub(crate) async fn automation_from_blueprint(
         &self,
         command: &AutomationFromBlueprint,

@@ -1,6 +1,6 @@
 # Contributing
 
-The repository implements hosted OAuth, authenticated MCP, and six bounded Home Assistant, Thread, and Matter tools. The generic Kuri `mcp` dependency uses a reviewed immutable Git revision.
+The repository implements hosted OAuth, authenticated MCP, resource-first smart-home reads, and create/edit/query/execute tools. Authoring uses existing Home Assistant APIs under a single-writer assumption, with best-effort revision and absence checks rather than atomic compare-and-swap. No Core patch is required. The generic Kuri `mcp` dependency uses a reviewed immutable Git revision.
 
 Blueprint and private component deployment have local implementation and test evidence. Keep that evidence separate from unverified live compatibility, installation, SSH/SFTP deployment, and external behavior.
 

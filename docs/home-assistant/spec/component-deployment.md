@@ -6,7 +6,7 @@ The repository implements this contract and covers it with local Rust tests. No 
 
 ## Action And Schema
 
-`home_assistant_exec` action `smarthome_mcp.deploy` accepts only this closed input:
+`execute` action `smarthome_mcp.deploy` accepts only this closed input:
 
 ```json
 {"confirm": true}

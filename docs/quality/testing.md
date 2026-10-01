@@ -60,7 +60,8 @@ Tests must cover the [Home Assistant specifications](../home-assistant/README.md
 - the complete [common-control action catalog](../home-assistant/common-controls.md) and numeric boundaries;
 - eight fixed [authoring and evidence actions](../home-assistant/spec/authoring-evidence.md), including complete authorized config reads and bounded projected traces;
 - fixed blueprint list, semantic get, replace-save, substitution, setup, and separately confirmed restart behavior;
-- six-tool progressive discovery and endpoint-wide `mcp:use` authority without a separate management scope;
+- public create/edit/query/execute and resource discovery plus private adapter discovery, with endpoint-wide `mcp:use` authority and no separate management scope;
+- local YAML mapping/syntax/duplicate-key checks, parser recursion protection, `!input` preservation, semantic no-op rejection, and native schema rejection;
 - redirect denial, body/frame/URL/time/concurrency bounds, cancellation, and permit release; and
 - stable source-free errors without credentials, household values, identifiers, paths, bodies, or raw upstream errors.
 
@@ -98,7 +99,7 @@ Negative tests must verify that errors, logs, redirects, traces, and MCP content
 | --- | --- |
 | PostgreSQL | Embedded migrations, expiry, one-shot state, replay prevention, refresh rotation, and encrypted signing-key persistence against a disposable database. |
 | Authentik | Discovery, browser login, callback validation, and local token issuance. |
-| Kuri client | DCR, CIMD, loopback authorization, refresh, exact resource binding, and discovery and invocation of all six tools. |
+| Kuri client | DCR, CIMD, loopback authorization, refresh, exact resource binding, query/execute discovery and invocation, dynamic resource catalogs/templates/reads. |
 | Home Assistant | Version-pinned blueprint model, config flow, restart, custom integration load, and current controlled-operation evidence. |
 | SSH/SFTP | Independently verified Ed25519 host identity, password authentication, SFTP-only operation, bounded filesystem transaction, rollback, and recovery. |
 | Container | Multi-architecture build, UID, revision label, embedded component, private-material inspection, and startup with controlled dependencies. |

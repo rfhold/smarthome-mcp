@@ -1,5 +1,7 @@
 # Home Assistant Authoring and Evidence Contract
 
+Public routing is defined by the [resource-first contract](resource-first.md): reads and traces are resources, validation uses `query`, and legacy authoring action names below are private adapters, not exposed aliases. Public create/edit use [simple authoring](simple-authoring.md): local ordered edits and best-effort revision/absence checks followed by existing native writes under a single-writer assumption. This is not atomic compare-and-swap.
+
 This contract defines eight narrow authoring and evidence actions within the six progressive tools. They add authoring, stored-config reads, and projected evidence without generic Home Assistant access. The [blueprint contract](blueprints.md) defines separate implemented actions.
 
 ## Action Catalog

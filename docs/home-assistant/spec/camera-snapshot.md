@@ -1,5 +1,7 @@
 # Camera Snapshot
 
+Public snapshots use `smarthome://cameras/{entity_id}` resource blobs under the [resource-first contract](resource-first.md). The image action and tool name below refer to the private adapter, not a public alias.
+
 `camera.snapshot` accepts exactly one syntactically valid `camera.*` entity ID. Unknown fields and every other entity domain produce `invalid_arguments` before concurrency admission or network contact.
 
 The action performs a fresh Assist exposure lookup for every invocation. It retrieves no image unless that exact entity has `conversation: true`. The [exposure and data-safety contract](../../architecture/exposure-data-safety.md) defines fail-closed authorization and privacy behavior.

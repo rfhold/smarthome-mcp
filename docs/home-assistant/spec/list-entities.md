@@ -1,5 +1,7 @@
 # List Entities
 
+Public reads use `smarthome://entities` and returned item links under the [resource-first contract](resource-first.md). The action below describes the private adapter; catalog reads use its fixed maximum limit without caller-selected search/filter parameters.
+
 `entity.list` reads `GET /api/states`, discards entities not explicitly exposed to the conversation assistant, normalizes approved fields, filters, sorts by entity ID, and applies the limit.
 
 | Input | Contract |

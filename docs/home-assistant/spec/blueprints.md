@@ -1,5 +1,7 @@
 # Home Assistant Blueprint Contract
 
+The [resource-first contract](resource-first.md) owns public routing: blueprint reads are resources, lifecycle commands use `execute`, and save/from-blueprint action names below are private adapters only. Public creation and direct revision editing use [simple authoring](simple-authoring.md) with best-effort checks under a single-writer assumption.
+
 ## Status
 
 The repository implements this contract and local Rust and Python tests cover its bounded behavior. No live Home Assistant compatibility, component installation, deployment, or external-operation evidence exists.
@@ -8,7 +10,7 @@ The repository implements this contract and local Rust and Python tests cover it
 
 The repository includes a custom integration at `custom_components/smarthome_mcp/`, embedded into the MCP binary for private deployment. One no-input config flow creates one config entry. The integration supports a single entry and treats another flow as already configured.
 
-The integration registers one administrator-only WebSocket command, `smarthome_mcp/blueprint/get`. Its closed input contains one validated automation blueprint path. The command does not accept a filesystem path, URL, domain, or command name.
+The integration registers only the read-only administrator WebSocket command `smarthome_mcp/blueprint/get`. Its closed input contains one validated automation blueprint path. No command accepts arbitrary filesystem access, URL, domain, or caller-selected command names. Native `blueprint/list` and `blueprint/save` provide authoring without a Core patch or extra component commands.
 
 The command resolves the path through Home Assistant's internal `DomainBlueprints.async_get_blueprint` model for the automation domain. It serializes the resolved blueprint through `Blueprint.yaml()` and returns semantic YAML. The result preserves blueprint meaning, but comments, scalar style, key order, and other formatting can change. Byte-identical source retrieval is not a supported contract.
 

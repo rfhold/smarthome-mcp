@@ -2,10 +2,9 @@
 
 | Tool | Actions and inputs |
 | --- | --- |
-| `thread_query` | `network.list` and `readiness.get`: empty input; `router.discover`: optional `duration_seconds`, 1-10, default 3. |
-| `matter_query` | `readiness.get`: empty input; `device.list`: optional `limit`, 1-100, default 50; `device.diagnostics` and `device.ping`: exact `device_id`. |
-| `thread_exec` | `network.set_preferred`: exact `dataset_id`; `router.set_preferred`: exact `dataset_id` and `extended_address`, optional nullable `border_agent_id`. |
-| `matter_exec` | `device.interview`: exact `device_id`. |
+| Resources | `smarthome://thread/networks` and `smarthome://matter/devices`; follow returned canonical item links. |
+| `query` | `thread.readiness.get` and `matter.readiness.get`: empty input; `thread.router.discover`: optional `duration_seconds`, 1-10, default 3; `matter.device.diagnostics` and `matter.device.ping`: exact `device_id`. |
+| `execute` | `thread.network.set_preferred`: exact `dataset_id`; `thread.router.set_preferred`: exact `dataset_id` and `extended_address`, optional nullable `border_agent_id`; `matter.device.interview`: exact `device_id`. |
 
 Use current closed schemas and optional query filters, not removed help actions. Identifiers allow 1-255 ASCII bytes of letters, digits, hyphen, underscore, colon, and dot. Read current networks and routers before selecting; Home Assistant decides whether identifiers exist. Omitted `border_agent_id` is sent as null. Preferred selection and interview require explicit user confirmation for the exact target and effect; their API schemas do not have a `confirm` field, so do not invent one.
 

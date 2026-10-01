@@ -1,9 +1,11 @@
 # Home Assistant
 
-The current runtime has six progressive tools. Entity operations apply fresh Assist exposure authorization. Authoring, blueprint, component deployment, setup, restart, Thread, and Matter administrator actions use endpoint-wide `mcp:use`. Local code and tests cover these contracts. Live Home Assistant compatibility, SSH/SFTP deployment, installation, and external behavior remain unverified.
+The public runtime has `create`, `edit`, `query`, and `execute`, dynamic `smarthome://` resources, and immutable Skills. Entity operations apply fresh Assist exposure authorization; administrator capabilities retain endpoint-wide `mcp:use`. Creation and text editing use existing native APIs with best-effort checks under a single-writer assumption. Live compatibility, installation, deployment, and external behavior remain unverified. The resource-first contract owns public routing; domain documents retain private adapter details.
 
 | Document | Covers |
 | --- | --- |
+| [Resource-first interface](spec/resource-first.md) | Current tools, catalogs, templates, canonical links, and single-writer authoring. |
+| [Simple authoring](spec/simple-authoring.md) | Existing native endpoints, best-effort checks, limits, and uncertain outcomes. |
 | [Shared contract](spec/common.md) | Tool boundaries, authentication, exposure, limits, normalization, and errors. |
 | [MCP Skills](spec/skills.md) | Immutable authored catalog, extension discovery, exact resource manifests, help cutover, and authority boundaries. |
 | [Common controls](common-controls.md) | The complete execution action catalog, inputs, fixed service mapping, and exclusions. |

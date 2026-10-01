@@ -1,5 +1,7 @@
 # Thread and Matter Tools
 
+The [resource-first contract](resource-first.md) owns public routing: inventories are resources; discovery/readiness/diagnostics/ping use `query` with `thread.` or `matter.` action prefixes; selection/interview use `execute` with those prefixes. Legacy tool names below identify private adapter contracts, not public aliases.
+
 ## Purpose
 
 This specification defines the complete Thread and Matter progressive tool surface. It owns action catalogs, inputs, outputs, authorization, safety properties, and exclusions.

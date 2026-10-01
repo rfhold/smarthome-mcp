@@ -2,7 +2,7 @@
 
 `smarthome-mcp` is a Rust MCP server for authenticated, bounded smarthome integrations.
 
-The current runtime implements hosted OAuth, stateless MCP, and six progressive Home Assistant, Thread, and Matter tools. Entity operations require current Assist exposure. Fixed administrator actions support authoring, blueprints, private component deployment, setup, and confirmed restart.
+The current runtime implements hosted OAuth, stateless MCP, resource-first reads, and `create`/`edit`/`query`/`execute` tools using existing Home Assistant APIs. Authoring assumes a single writer: revision and existence checks are best-effort, not atomic. No Core patch is required; blueprint reads use the existing semantic blueprint reader component. Entity operations require current Assist exposure. Fixed administrator commands support private component deployment, setup, confirmed restart, Thread selection, and Matter interview. See the [public interface](docs/home-assistant/spec/resource-first.md).
 
 Five authored [MCP Skills](docs/home-assistant/spec/skills.md) provide workflow guidance through `skills/list`, `skills/get`, and exact resource reads. Tool schemas list domain actions directly; generated `help` actions are removed with no compatibility aliases. Skill discovery does not grant mutation authority.
 
@@ -13,7 +13,7 @@ Implementation entry points are [the library](src/lib.rs), [the Axum process](sr
 ## Private Component Deployment
 
 1. Seed the protected deployment credential Stashes through an authorized Pulumi bootstrap.
-2. Invoke `home_assistant_exec` action `smarthome_mcp.deploy` with `confirm: true`.
+2. Invoke `execute` action `smarthome_mcp.deploy` with `confirm: true`.
 3. If the result reports `restart_required: true`, invoke `home_assistant.restart` separately with `confirm: true`.
 4. After Home Assistant is ready, invoke `smarthome_mcp.setup` separately.
 5. Verify that Home Assistant registers `smarthome_mcp/blueprint/get`.

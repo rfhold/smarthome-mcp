@@ -25,7 +25,7 @@ Production intentionally lacks the required SSH target configuration and remains
 1. Confirm an authorized preview deployment has current protected Stash values, the dedicated Secret mount, and exact `/32` egress.
 2. Independently verify the target's current Ed25519 host public key and expected SFTP service.
 3. Confirm the intended image reports an MCP version matching its Cargo package version and embeds the same manifest version. Rust and Python tests enforce this invariant before image construction.
-4. Invoke `home_assistant_exec` action `smarthome_mcp.deploy` with `{"confirm":true}`.
+4. Invoke `execute` action `smarthome_mcp.deploy` with `{"confirm":true}`.
 5. Record only the bounded operation, changed flag, previous version when present, installed version, restart requirement, and safe error code.
 6. If changed, invoke `home_assistant.restart` separately with `{"confirm":true}` and wait for Home Assistant readiness.
 7. Invoke `smarthome_mcp.setup` separately after Home Assistant has loaded the component.

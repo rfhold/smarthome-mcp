@@ -1,5 +1,7 @@
 # List Devices
 
+Public reads use `smarthome://devices` and returned item links under the [resource-first contract](resource-first.md). The `device.list` name below refers only to the private adapter.
+
 `device.list` returns current normalized states grouped by Home Assistant device and effective area. The `home_assistant_query` input schema exposes the action directly; the [MCP Skills catalog](skills.md) provides inspection guidance without `help` actions.
 
 | Input | Contract |
