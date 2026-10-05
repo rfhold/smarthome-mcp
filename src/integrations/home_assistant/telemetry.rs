@@ -100,6 +100,7 @@ fn metric_action(value: &'static str) -> &'static str {
         "automation.upsert" => "automation.upsert",
         "automation.list" => "automation.list",
         "automation.get" => "automation.get",
+        "automation.trigger" => "automation.trigger",
         "automation.validate" => "automation.validate",
         "automation.traces" => "automation.traces",
         "blueprint.list" => "blueprint.list",
@@ -148,6 +149,7 @@ fn metric_outcome(value: &'static str) -> &'static str {
         | "response_too_large"
         | "invalid_response"
         | "cancelled" => value,
+        "revision_conflict" | "mutation_outcome_unknown" => value,
         _ => "upstream_unavailable",
     }
 }
@@ -166,6 +168,8 @@ pub(super) fn request_outcome<T>(result: &Result<T, Error>) -> &'static str {
         Err(Error::UpstreamUnavailable) => "upstream_unavailable",
         Err(Error::ResponseTooLarge) => "response_too_large",
         Err(Error::InvalidResponse) => "invalid_response",
+        Err(Error::RevisionConflict) => "revision_conflict",
+        Err(Error::MutationOutcomeUnknown) => "mutation_outcome_unknown",
     }
 }
 

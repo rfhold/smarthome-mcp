@@ -15,8 +15,8 @@ pub use authoring::{
 };
 pub use camera_snapshot::CameraSnapshotInput;
 pub use controls::{
-    ClimateTemperatureInput, CoverPositionInput, EntityControlInput, FanPercentageInput,
-    LightTurnOnInput, MediaPlayerVolumeInput,
+    AutomationTriggerInput, ClimateTemperatureInput, CoverPositionInput, EntityControlInput,
+    FanPercentageInput, LightTurnOnInput, MediaPlayerVolumeInput,
 };
 pub use get_history::GetHistoryInput;
 pub use get_states::GetStatesInput;
@@ -52,6 +52,17 @@ pub(crate) fn valid_entity_id(value: &str) -> bool {
         return false;
     };
     valid_name(domain) && valid_name(object_id)
+}
+
+pub(crate) fn native_revision(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
+        "sha256:{}",
+        Sha256::digest(text.as_bytes())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    )
 }
 
 fn valid_name(value: &str) -> bool {

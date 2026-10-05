@@ -9,6 +9,39 @@ const MAX_TEMPERATURE: f64 = 1000.0;
 
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
+pub struct AutomationTriggerInput {
+    /// Exact editor-managed config key to execute.
+    #[schemars(length(min = 1, max = 64), regex(pattern = "^[a-z0-9_]+$"))]
+    pub config_key: String,
+    /// Current revision from smarthome://automations/<config_key>.
+    #[schemars(length(min = 71, max = 71), regex(pattern = "^sha256:[0-9a-f]{64}$"))]
+    pub expected_revision: String,
+    /// Must be true to dispatch live effects.
+    #[schemars(schema_with = "super::management::true_schema")]
+    pub confirm: bool,
+    /// Explicitly bypass top-level conditions; defaults to false.
+    #[serde(default)]
+    pub skip_conditions: bool,
+}
+
+impl AutomationTriggerInput {
+    pub(crate) fn valid(&self) -> bool {
+        self.confirm
+            && super::valid_config_key(&self.config_key)
+            && self
+                .expected_revision
+                .strip_prefix("sha256:")
+                .is_some_and(|digest| {
+                    digest.len() == 64
+                        && digest
+                            .bytes()
+                            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                })
+    }
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct EntityControlInput {
     /// Domain-matching Home Assistant entity ID explicitly exposed to Assist.
     pub entity_id: String,
@@ -285,6 +318,42 @@ impl MediaPlayerVolumeInput {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automation_trigger_is_closed_confirmed_and_condition_safe() {
+        let value = json!({"config_key":"evening_lights","expected_revision":format!("sha256:{}", "a".repeat(64)),"confirm":true});
+        let input: AutomationTriggerInput = serde_json::from_value(value.clone()).unwrap();
+        assert!(input.valid());
+        assert!(!input.skip_conditions);
+        for key in [
+            "trigger",
+            "variables",
+            "entity_id",
+            "skip_condition",
+            "dry_run",
+            "service",
+        ] {
+            let mut extra = value.clone();
+            extra[key] = json!({});
+            assert!(serde_json::from_value::<AutomationTriggerInput>(extra).is_err());
+        }
+        for (key, invalid) in [
+            ("confirm", json!(false)),
+            ("expected_revision", json!("sha256:bad")),
+            ("config_key", json!("automation.target")),
+        ] {
+            let mut wrong = value.clone();
+            wrong[key] = invalid;
+            assert!(
+                !serde_json::from_value::<AutomationTriggerInput>(wrong)
+                    .unwrap()
+                    .valid()
+            );
+        }
+        let schema = serde_json::to_value(schemars::schema_for!(AutomationTriggerInput)).unwrap();
+        assert_eq!(schema["additionalProperties"], false);
+        assert_eq!(schema["properties"]["confirm"]["const"], true);
+    }
 
     const ACTIONS: [ControlAction; 23] = [
         ControlAction::SceneActivate,

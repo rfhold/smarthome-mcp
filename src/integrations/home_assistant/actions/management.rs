@@ -176,7 +176,7 @@ fn validate_optional_text(value: Option<&str>, max: usize) -> Result<(), ()> {
     }
 }
 
-fn true_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+pub(super) fn true_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     serde_json::from_value(serde_json::json!({"type":"boolean","const":true}))
         .expect("valid schema")
 }

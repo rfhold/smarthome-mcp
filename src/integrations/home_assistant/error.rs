@@ -14,11 +14,15 @@ pub enum Error {
     UpstreamUnavailable,
     ResponseTooLarge,
     InvalidResponse,
+    RevisionConflict,
+    MutationOutcomeUnknown,
 }
 
 impl Error {
     pub fn into_tool_error(self, action_name: &str) -> ToolError {
         let (code, message, retryable) = match self {
+            Self::RevisionConflict => ("revision_conflict", "The automation configuration changed. Read it again before execution.".to_owned(), false),
+            Self::MutationOutcomeUnknown => ("mutation_outcome_unknown", "Automation dispatch outcome is unknown. Do not retry; upstream execution may continue and is not rolled back or cancelled.".to_owned(), false),
             Self::InvalidArguments => (
                 "invalid_arguments",
                 format!("The {action_name} arguments are invalid."),

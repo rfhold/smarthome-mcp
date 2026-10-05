@@ -1,7 +1,10 @@
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     future::Future,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::Duration,
 };
 
@@ -27,11 +30,12 @@ use crate::{config::Secret, http_client};
 use super::{
     Error,
     actions::{
-        AutomationFromBlueprint, AutomationTracesQuery, AutomationValidation, BlueprintListQuery,
-        BlueprintPath, BlueprintSave, CameraSnapshotQuery, ConfigGetQuery, ConfigListQuery,
-        ConfigUpsert, Control, DevicesQuery, EntitiesQuery, HistoryQuery, MatterDeviceQuery,
-        MatterDevicesQuery, PreferredDatasetCommand, PreferredRouterCommand, RouterDiscoveryQuery,
-        StatesQuery, valid_config_key, valid_entity_id, validate_native_json,
+        AutomationFromBlueprint, AutomationTracesQuery, AutomationTriggerInput,
+        AutomationValidation, BlueprintListQuery, BlueprintPath, BlueprintSave,
+        CameraSnapshotQuery, ConfigGetQuery, ConfigListQuery, ConfigUpsert, Control, DevicesQuery,
+        EntitiesQuery, HistoryQuery, MatterDeviceQuery, MatterDevicesQuery,
+        PreferredDatasetCommand, PreferredRouterCommand, RouterDiscoveryQuery, StatesQuery,
+        native_revision, valid_config_key, valid_entity_id, validate_native_json,
     },
     telemetry::{MetricsGuard, request_outcome},
 };
@@ -273,6 +277,47 @@ pub(crate) struct CameraSnapshot {
 }
 
 impl HomeAssistantClient {
+    pub(crate) async fn trigger_automation(
+        &self,
+        input: &AutomationTriggerInput,
+        dispatched: &AtomicBool,
+    ) -> Result<Value, Error> {
+        if !input.valid() {
+            return Err(Error::InvalidArguments);
+        }
+        let _permit = self.admit()?;
+        let mut metrics = MetricsGuard::new("automation.trigger");
+        let span = operation_span("home_assistant.exec", "automation.trigger");
+        let result = tokio::time::timeout(self.timeout, async {
+            let url = self.endpoint(&["api", "config", "automation", "config", &input.config_key])?;
+            let config: Value = self.get_json(url).await.map_err(config_get_error)?;
+            if !config.is_object() || validate_native_json(&config).is_err()
+                || config["id"].as_str() != Some(input.config_key.as_str()) {
+                return Err(Error::InvalidResponse);
+            }
+            let native = serde_json::to_string_pretty(&config).map_err(|_| Error::InvalidResponse)?;
+            if native.len() > 256 * 1024 { return Err(Error::ResponseTooLarge); }
+            if native_revision(&native) != input.expected_revision { return Err(Error::RevisionConflict); }
+            let states: Vec<RawStoredConfigState> = self.get_json(self.endpoint(&["api", "states"])?).await?;
+            let mut matching = states.iter().filter(|state| {
+                state.entity_id.starts_with("automation.") && state.attributes["id"].as_str() == Some(input.config_key.as_str())
+            });
+            let state = matching.next().ok_or(Error::ConfigNotFound)?;
+            if matching.next().is_some() || !valid_entity_id(&state.entity_id) { return Err(Error::InvalidResponse); }
+            let url = self.endpoint(&["api", "services", "automation", "trigger"])?;
+            dispatched.store(true, Ordering::SeqCst);
+            self.post_json_acceptance(url, &json!({"entity_id":state.entity_id,"skip_condition":input.skip_conditions}))
+                .await.map_err(|_| Error::MutationOutcomeUnknown)?;
+            Ok(json!({"action":"automation.trigger","config_key":input.config_key,"entity_id":state.entity_id,
+                "acknowledged":true,"completion_verified":false,"effects_verified":false,
+                "skip_conditions":input.skip_conditions,"revision_check":"best-effort","trace_correlation":"unsupported"}))
+        }).instrument(span.clone()).await.unwrap_or_else(|_| Err(if dispatched.load(Ordering::SeqCst) {
+            Error::MutationOutcomeUnknown
+        } else { Error::Timeout }));
+        finish_operation(&span, &mut metrics, &result);
+        result
+    }
+
     pub fn production(origin: Url, token: Secret) -> Result<Self, String> {
         let http = Client::builder()
             .redirect(Policy::none())
@@ -2763,6 +2808,7 @@ mod tests {
         service_status: StatusCode,
         service_body: Vec<u8>,
         service_delay: Option<Duration>,
+        service_header_delay: Option<Duration>,
         config_response: Value,
         config_delay: Option<Duration>,
         websocket_delays: HashMap<&'static str, Duration>,
@@ -2799,6 +2845,7 @@ mod tests {
                 service_status: StatusCode::OK,
                 service_body: b"[{\"must_not_leak\":true}]".to_vec(),
                 service_delay: None,
+                service_header_delay: None,
                 config_response: json!({"result":"ok"}),
                 config_delay: None,
                 websocket_delays: HashMap::new(),
@@ -5927,6 +5974,228 @@ mod tests {
         server.abort();
     }
 
+    fn trigger_fixture() -> (MockHomeAssistant, AutomationTriggerInput) {
+        let config = json!({"id":"evening_lights","alias":"Evening lights","actions":[]});
+        let input = AutomationTriggerInput {
+            config_key: "evening_lights".into(),
+            expected_revision: native_revision(&serde_json::to_string_pretty(&config).unwrap()),
+            confirm: true,
+            skip_conditions: false,
+        };
+        (
+            MockHomeAssistant::new(
+                json!({}),
+                json!([{"entity_id":"automation.renamed","attributes":{"id":"evening_lights"}}]),
+                json!([]),
+            )
+            .with_config_response(config),
+            input,
+        )
+    }
+
+    #[tokio::test]
+    async fn trigger_checks_confirmation_revision_mapping_and_condition_policy_before_dispatch() {
+        for skip_conditions in [false, true] {
+            let (mock, mut input) = trigger_fixture();
+            input.skip_conditions = skip_conditions;
+            let (origin, server) = serve(mock.clone()).await;
+            let client = HomeAssistantClient::for_test(
+                origin,
+                Secret("secret".into()),
+                Duration::from_secs(2),
+            );
+            let dispatched = AtomicBool::new(false);
+            let output = client
+                .trigger_automation(&input, &dispatched)
+                .await
+                .unwrap();
+            assert!(dispatched.load(Ordering::SeqCst));
+            assert_eq!(output["entity_id"], "automation.renamed");
+            assert_eq!(output["acknowledged"], true);
+            assert_eq!(output["completion_verified"], false);
+            assert_eq!(output["effects_verified"], false);
+            assert_eq!(output["trace_correlation"], "unsupported");
+            assert!(output.get("success").is_none());
+            assert_eq!(mock.websocket_calls.load(Ordering::Relaxed), 0);
+            let requests = mock.requests.lock().unwrap().clone();
+            assert!(requests.contains(&"service:/api/services/automation/trigger".into()));
+            let body = requests
+                .iter()
+                .find_map(|s| s.strip_prefix("service-body:"))
+                .unwrap();
+            assert_eq!(
+                serde_json::from_str::<Value>(body).unwrap(),
+                json!({"entity_id":"automation.renamed","skip_condition":skip_conditions})
+            );
+            assert!(!output.to_string().contains("must_not_leak"));
+            server.abort();
+        }
+        for case in 0..8 {
+            let (mut mock, mut input) = trigger_fixture();
+            let expected = match case {
+                0 => {
+                    input.confirm = false;
+                    Error::InvalidArguments
+                }
+                1 => {
+                    input.config_key = "automation.target".into();
+                    Error::InvalidArguments
+                }
+                2 => {
+                    mock.config_response["alias"] = json!("Changed since resource read");
+                    Error::RevisionConflict
+                }
+                3 => {
+                    mock.config_response["id"] = json!("other");
+                    Error::InvalidResponse
+                }
+                4 => {
+                    mock.states = json!([]);
+                    Error::ConfigNotFound
+                }
+                5 => {
+                    mock.states = json!([{"entity_id":"automation.one","attributes":{"id":"evening_lights"}},{"entity_id":"automation.two","attributes":{"id":"evening_lights"}}]);
+                    Error::InvalidResponse
+                }
+                6 => {
+                    mock.states = json!([{"entity_id":"automation.Wrong","attributes":{"id":"evening_lights"}}]);
+                    Error::InvalidResponse
+                }
+                _ => {
+                    input.expected_revision = "sha256:bad".into();
+                    Error::InvalidArguments
+                }
+            };
+            let (origin, server) = serve(mock.clone()).await;
+            let client = HomeAssistantClient::for_test(
+                origin,
+                Secret("secret".into()),
+                Duration::from_secs(2),
+            );
+            let dispatched = AtomicBool::new(false);
+            assert_eq!(
+                client.trigger_automation(&input, &dispatched).await,
+                Err(expected)
+            );
+            assert!(!dispatched.load(Ordering::SeqCst));
+            assert_eq!(mock.service_calls.load(Ordering::Relaxed), 0);
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn trigger_post_dispatch_errors_and_timeouts_are_unknown_and_never_retried() {
+        for timeout in [false, true] {
+            let (mut mock, input) = trigger_fixture();
+            if timeout {
+                mock.service_header_delay = Some(Duration::from_secs(1));
+            } else {
+                mock.service_status = StatusCode::INTERNAL_SERVER_ERROR;
+                mock.service_body = b"private upstream error".to_vec();
+            }
+            let (origin, server) = serve(mock.clone()).await;
+            let client = HomeAssistantClient::for_test(
+                origin,
+                Secret("secret".into()),
+                Duration::from_millis(150),
+            );
+            let dispatched = AtomicBool::new(false);
+            assert_eq!(
+                client.trigger_automation(&input, &dispatched).await,
+                Err(Error::MutationOutcomeUnknown)
+            );
+            assert!(dispatched.load(Ordering::SeqCst));
+            assert_eq!(mock.service_calls.load(Ordering::Relaxed), 1);
+            let error = Error::MutationOutcomeUnknown
+                .into_tool_error("trigger automation")
+                .into_mcp_result()
+                .raw;
+            assert_eq!(error["structuredContent"]["error"]["retryable"], false);
+            assert!(!error.to_string().contains("private upstream error"));
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn trigger_disconnect_after_request_is_nonretryable_unknown() {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+        let (mock, input) = trigger_fixture();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = tokio::spawn(async move {
+            for body in [
+                Some(mock.config_response.to_string()),
+                Some(mock.states.to_string()),
+                None,
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).await.unwrap();
+                    request.push(byte[0]);
+                    if request.ends_with(b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                if let Some(body) = body {
+                    stream.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                } else {
+                    assert!(
+                        String::from_utf8_lossy(&request)
+                            .starts_with("POST /api/services/automation/trigger ")
+                    );
+                    let headers = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                    let length = headers
+                        .lines()
+                        .find_map(|line| line.strip_prefix("content-length: "))
+                        .unwrap()
+                        .trim()
+                        .parse::<usize>()
+                        .unwrap();
+                    let mut body = vec![0; length];
+                    stream.read_exact(&mut body).await.unwrap();
+                    assert_eq!(
+                        serde_json::from_slice::<Value>(&body).unwrap(),
+                        json!({"entity_id":"automation.renamed","skip_condition":false})
+                    );
+                    // Drop the connection after consuming the mutation, without an acknowledgment.
+                }
+            }
+        });
+        let client =
+            HomeAssistantClient::for_test(origin, Secret("secret".into()), Duration::from_secs(2));
+        let dispatched = AtomicBool::new(false);
+        assert_eq!(
+            client.trigger_automation(&input, &dispatched).await,
+            Err(Error::MutationOutcomeUnknown)
+        );
+        assert!(dispatched.load(Ordering::SeqCst));
+        assert!(client.has_full_test_capacity());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn trigger_read_timeout_never_dispatches() {
+        let (mock, input) = trigger_fixture();
+        let mock = mock.with_config_delay(Duration::from_secs(1));
+        let (origin, server) = serve(mock.clone()).await;
+        let client = HomeAssistantClient::for_test(
+            origin,
+            Secret("secret".into()),
+            Duration::from_millis(50),
+        );
+        let dispatched = AtomicBool::new(false);
+        assert_eq!(
+            client.trigger_automation(&input, &dispatched).await,
+            Err(Error::Timeout)
+        );
+        assert!(!dispatched.load(Ordering::SeqCst));
+        assert_eq!(mock.service_calls.load(Ordering::Relaxed), 0);
+        assert!(client.has_full_test_capacity());
+        server.abort();
+    }
+
     async fn serve(mock: MockHomeAssistant) -> (Url, JoinHandle<()>) {
         let app = Router::new()
             .route("/api/websocket", get(websocket))
@@ -6151,11 +6420,15 @@ mod tests {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .unwrap_or("");
-        let mut requests = mock.requests.lock().unwrap();
-        requests.push(format!("service:{uri}"));
-        requests.push(format!("service-content-type:{content_type}"));
-        requests.push(format!("service-body:{}", String::from_utf8_lossy(&body)));
-        drop(requests);
+        {
+            let mut requests = mock.requests.lock().unwrap();
+            requests.push(format!("service:{uri}"));
+            requests.push(format!("service-content-type:{content_type}"));
+            requests.push(format!("service-body:{}", String::from_utf8_lossy(&body)));
+        }
+        if let Some(delay) = mock.service_header_delay {
+            tokio::time::sleep(delay).await;
+        }
         let mut response = Response::builder().status(mock.service_status);
         if mock.service_status.is_redirection() {
             response = response.header(reqwest::header::LOCATION, "/api/states");

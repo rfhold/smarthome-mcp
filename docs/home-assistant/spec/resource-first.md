@@ -36,6 +36,28 @@ Camera contents use MCP resource `blob` with standard base64 and validated MIME 
 
 `execute` retains all fixed physical controls under domain action names, including `scene.activate` and `media_player.stop`. It also includes `smarthome_mcp.deploy`, `smarthome_mcp.setup`, `home_assistant.restart`, `thread.network.set_preferred`, `thread.router.set_preferred`, and `matter.device.interview`. Selection, interview, restart, and setup are commands, not text edits. Exact confirmations, fixed targets, host trust, and separate deploy/restart/setup decisions remain unchanged. A command acknowledgment is not verified physical state, reload completion, or readiness. Unconfirmed, cancelled, or timed-out writes can have unknown outcomes and must not be automatically repeated.
 
+## Live Automation Dispatch
+
+`execute` also exposes `automation.trigger` for one exact editor-managed automation. Its closed input requires `config_key`, `expected_revision` (the current resource `_meta.revision`), and `confirm: true`. Optional `skip_conditions` defaults to `false`. Unknown fields are rejected, including `entity_id`, `variables`, `trigger`, `dry_run`, and caller-selected services. This is live execution, not validation, simulation, or preflight.
+
+Existing authenticated clients with `mcp:use` can manually run any resolvable editor-managed automation using the configured administrator Home Assistant token, with explicit confirmation and a current revision. There is no separate per-automation approval configuration or per-action permission system. `config_key` remains the exact target identity (native automation ID), not an entity ID; it accepts 1-64 lowercase ASCII letters, digits, or underscores.
+
+Before sending, the service checks explicit confirmation, fresh native editor config GET, config `id` equality, the canonical displayed-text revision, and a unique valid `automation.*` state whose `attributes.id` exactly matches the config key. Missing, mismatched, or ambiguous mappings fail closed. Entity names may differ from config keys. These checks are observational and best-effort, not atomic; configuration or entity mapping can change before execution. They do not verify whether the loaded runtime has finished reloading the stored configuration.
+
+The fixed native call is `automation.trigger`, with one internally resolved `entity_id` and `skip_condition: false` by default. Explicit `skip_conditions: true` bypasses top-level conditions. Automation execution uses endpoint-wide authentication and administrator upstream authority; nested actions and their entity references are not recursively Assist-exposure-authorized. Existing entity controls still require fresh Assist exposure. This broader live-execution authority permits the native action sequence to affect entities not exposed to Assist; review the automation and obtain explicit user authority for its live effects before each dispatch, including after changes.
+
+Read `smarthome://automations/evening_lights`, review its current text, then use its actual revision:
+
+```json
+{"action":"automation.trigger","input":{"config_key":"evening_lights","expected_revision":"sha256:<64 lowercase hex characters from _meta.revision>","confirm":true}}
+```
+
+No synthetic trigger context or variables are accepted. Home Assistant's native manual trigger supplies its own `variables.trigger`; manual dispatch does not recreate a state transition or fulfill expressions such as `trigger.to_state`. Trigger-dependent automations may skip or fail even when dispatch is acknowledged.
+
+The bounded response has `action`, `config_key`, resolved `entity_id`, `acknowledged: true`, `completion_verified: false`, `effects_verified: false`, `skip_conditions`, `revision_check: 'best-effort'`, and `trace_correlation: 'unsupported'`. HTTP success headers are dispatch acknowledgment only, not proof that conditions passed, actions completed, or devices changed. No upstream body, newest-trace guess, or completion claim is returned. The independent trace resource remains available, but its newest entry cannot reliably be correlated with this call.
+
+The existing 20-second overall operation timeout includes reads and dispatch. Long-running native automations may outlive it. Once dispatch can have started, the handler classifies dispatch errors, timeouts, disconnects, and caller cancellation as nonretryable `mutation_outcome_unknown`. Conservative classification includes HTTP errors. The pinned MCP SDK can drop the handler and suppress the response on transport cancellation. Clients cannot rely on receipt of the unknown-outcome error after cancellation; an absent response does not prove that execution stopped. There is no automatic retry, upstream cancellation, rollback, or automation-stop capability. Observe independently before any new explicitly authorized decision. Errors are sanitized and do not echo config text, secrets, or upstream bodies.
+
 ## Single-Writer Authoring
 
 Discovery always exposes `create` and `edit`. They use existing native config GET/POST and blueprint list/save APIs; blueprint item reads require only the existing semantic blueprint reader component. No Core patch, authoring capability probe, or extra component command is required. No `destroy` tool exists. Legacy config upsert/save/from-blueprint action names remain excluded from public dispatch.

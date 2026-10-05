@@ -21,14 +21,14 @@ use crate::{
     integrations::home_assistant::{
         DeployInput, Error as HomeAssistantError,
         actions::{
-            AutomationFromBlueprintInput, AutomationTracesInput, AutomationValidateInput,
-            BlueprintGetInput, BlueprintListInput, BlueprintSaveInput, CameraSnapshotInput,
-            ClimateTemperatureInput, ConfigGetInput, ConfigListInput, ConfigUpsertInput,
-            ConfirmInput, Control, ControlAction, CoverPositionInput, DiscoverRoutersInput,
-            EmptyInput, EntityControlInput, FanPercentageInput, GetHistoryInput, GetStatesInput,
-            LightTurnOnInput, ListDevicesInput, ListEntitiesInput, ListMatterDevicesInput,
-            MatterDeviceInput, MatterEmptyInput, MediaPlayerVolumeInput, SetPreferredDatasetInput,
-            SetPreferredRouterInput, ThreadEmptyInput,
+            AutomationFromBlueprintInput, AutomationTracesInput, AutomationTriggerInput,
+            AutomationValidateInput, BlueprintGetInput, BlueprintListInput, BlueprintSaveInput,
+            CameraSnapshotInput, ClimateTemperatureInput, ConfigGetInput, ConfigListInput,
+            ConfigUpsertInput, ConfirmInput, Control, ControlAction, CoverPositionInput,
+            DiscoverRoutersInput, EmptyInput, EntityControlInput, FanPercentageInput,
+            GetHistoryInput, GetStatesInput, LightTurnOnInput, ListDevicesInput, ListEntitiesInput,
+            ListMatterDevicesInput, MatterDeviceInput, MatterEmptyInput, MediaPlayerVolumeInput,
+            SetPreferredDatasetInput, SetPreferredRouterInput, ThreadEmptyInput,
         },
     },
     services::Services,
@@ -164,6 +164,7 @@ fn public_action(tool: &str, action: &str) -> Option<(&'static str, String)> {
             if matches!(
                 action,
                 "scene.activate"
+                    | "automation.trigger"
                     | "smarthome_mcp.deploy"
                     | "smarthome_mcp.setup"
                     | "home_assistant.restart"
@@ -1796,6 +1797,16 @@ impl SmarthomeMcp {
         .await
     }
 
+    /// Trigger one editor-managed stored automation live. Conditions are respected by default.
+    #[action(tool = "home_assistant_exec", name = "automation.trigger")]
+    async fn trigger_automation(
+        &self,
+        input: AutomationTriggerInput,
+        context: ServerContext,
+    ) -> ServerResult<McpToolResult> {
+        execute_automation_trigger(self, input, context.cancelled()).await
+    }
+
     /// Unlock one lock explicitly exposed to Assist.
     #[action(tool = "home_assistant_exec", name = "lock.unlock")]
     async fn unlock_lock(
@@ -1810,6 +1821,26 @@ impl SmarthomeMcp {
             context,
         )
         .await
+    }
+}
+
+async fn execute_automation_trigger(
+    server: &SmarthomeMcp,
+    input: AutomationTriggerInput,
+    cancelled: impl std::future::Future<Output = ()>,
+) -> ServerResult<McpToolResult> {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let dispatched = AtomicBool::new(false);
+    let result = tokio::select! {
+        result = server.services.home_assistant.trigger_automation(&input, &dispatched) => result,
+        () = cancelled => {
+            if dispatched.load(Ordering::SeqCst) { Err(HomeAssistantError::MutationOutcomeUnknown) }
+            else { return Ok(crate::tool_error::ToolError::new("cancelled", "Automation dispatch cancelled before sending.", false).into_mcp_result()); }
+        }
+    };
+    match result {
+        Ok(output) => Ok(control_result(output)),
+        Err(error) => Ok(tool_error("trigger automation", error)),
     }
 }
 
@@ -2029,7 +2060,17 @@ mod tests {
                 .as_array()
                 .unwrap()
                 .len(),
-            29
+            30
+        );
+        assert!(
+            execute["inputSchema"]
+                .to_string()
+                .contains("automation.trigger")
+        );
+        let (_, denied) = post(&endpoint, request("tools/call", "trigger", json!({"name":"execute","arguments":{"action":"automation.trigger","input":{"config_key":"evening_lights","expected_revision":format!("sha256:{}", "a".repeat(64)),"confirm":true}}}))).await;
+        assert_eq!(
+            denied["result"]["structuredContent"]["error"]["code"],
+            "upstream_unavailable"
         );
         for tool in tools {
             assert_eq!(tool["inputSchema"]["additionalProperties"], false);
@@ -3010,6 +3051,208 @@ mod tests {
         ha.abort();
     }
 
+    async fn automation_trigger_cancellation_fixture() -> (
+        CancellationMock,
+        HomeAssistantClient,
+        JoinHandle<()>,
+        AutomationTriggerInput,
+    ) {
+        let mock = CancellationMock {
+            calls: Arc::new(AtomicUsize::new(0)),
+            started: Arc::new(Notify::new()),
+            dropped: Arc::new(AtomicBool::new(false)),
+            dropped_notify: Arc::new(Notify::new()),
+            bodies: Arc::new(Mutex::new(Vec::new())),
+        };
+        let config = json!({"id":"evening_lights","actions":[]});
+        let revision = crate::integrations::home_assistant::actions::native_revision(
+            &serde_json::to_string_pretty(&config).unwrap(),
+        );
+        let router = Router::new()
+            .route(
+                "/api/config/automation/config/evening_lights",
+                get(move || {
+                    let config = config.clone();
+                    async move { Json(config) }
+                }),
+            )
+            .route(
+                "/api/states",
+                get(|| async {
+                    Json(json!([{"entity_id":"automation.renamed","attributes":{"id":"evening_lights"}}]))
+                }),
+            )
+            .route(
+                "/api/services/automation/trigger",
+                route_post(delayed_config_upsert),
+            )
+            .with_state(mock.clone());
+        let (origin, ha) = serve(router).await;
+        let client = HomeAssistantClient::for_test(
+            url::Url::parse(&origin).unwrap(),
+            Secret("test-token".into()),
+            Duration::from_secs(10),
+        );
+        let input = AutomationTriggerInput {
+            config_key: "evening_lights".into(),
+            expected_revision: revision,
+            confirm: true,
+            skip_conditions: false,
+        };
+        (mock, client, ha, input)
+    }
+
+    #[tokio::test]
+    async fn automation_trigger_handler_cancellation_returns_nonretryable_unknown() {
+        let (mock, client, ha, input) = automation_trigger_cancellation_fixture().await;
+        let handler = SmarthomeMcp::new(Arc::new(Services::new(client.clone()))).unwrap();
+        let cancel = Arc::new(Notify::new());
+        let cancellation = cancel.clone();
+        let started = mock.started.notified();
+        let running = tokio::spawn(async move {
+            execute_automation_trigger(&handler, input, cancellation.notified()).await
+        });
+        tokio::time::timeout(Duration::from_secs(1), started)
+            .await
+            .unwrap();
+        let dropped = mock.dropped_notify.notified();
+        cancel.notify_one();
+        let result = tokio::time::timeout(Duration::from_secs(1), running)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap()
+            .raw;
+        assert_eq!(
+            result["structuredContent"]["error"]["code"],
+            "mutation_outcome_unknown"
+        );
+        assert_eq!(result["structuredContent"]["error"]["retryable"], false);
+        assert!(client.has_full_test_capacity());
+        tokio::time::timeout(Duration::from_secs(1), dropped)
+            .await
+            .unwrap();
+        assert_eq!(mock.calls.load(Ordering::Relaxed), 1);
+        ha.abort();
+    }
+
+    #[tokio::test]
+    async fn public_automation_trigger_cancellation_never_retries_and_releases_capacity() {
+        let (mock, client, ha, input) = automation_trigger_cancellation_fixture().await;
+        let revision = input.expected_revision;
+        let handler = Arc::new(ResourceFirstMcp(
+            SmarthomeMcp::new(Arc::new(Services::new(client.clone()))).unwrap(),
+        ));
+        let (mut writer, reader) = tokio::io::duplex(64 * 1024);
+        let (mut output_reader, output_writer) = tokio::io::duplex(64 * 1024);
+        let server = tokio::spawn(mcp::server::serve_stream(handler, reader, output_writer));
+        let started = mock.started.notified();
+        let call = request(
+            "tools/call",
+            "cancel-trigger",
+            json!({"name":"execute","arguments":{"action":"automation.trigger","input":{"config_key":"evening_lights","expected_revision":revision,"confirm":true}}}),
+        );
+        writer
+            .write_all(format!("{call}\n").as_bytes())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), started)
+            .await
+            .unwrap();
+        let mut cancel = request(
+            "notifications/cancelled",
+            "unused",
+            json!({"requestId":"cancel-trigger"}),
+        );
+        cancel.as_object_mut().unwrap().remove("id");
+        let dropped = mock.dropped_notify.notified();
+        writer
+            .write_all(format!("{cancel}\n").as_bytes())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), dropped)
+            .await
+            .unwrap();
+        assert!(client.has_full_test_capacity());
+        assert_eq!(mock.calls.load(Ordering::Relaxed), 1);
+        writer.shutdown().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(1), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let mut output = Vec::new();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            output_reader.read_to_end(&mut output),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        // The SDK can suppress the response when its transport cancellation branch wins.
+        if !output.is_empty() {
+            let result: Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(
+                result["result"]["structuredContent"]["error"]["code"],
+                "mutation_outcome_unknown"
+            );
+            assert_eq!(
+                result["result"]["structuredContent"]["error"]["retryable"],
+                false
+            );
+        }
+        ha.abort();
+    }
+
+    #[tokio::test]
+    async fn resource_first_trigger_dispatches_with_default_client_and_condition_policy() {
+        let config = json!({"id":"evening_lights","actions":[]});
+        let revision = crate::integrations::home_assistant::actions::native_revision(
+            &serde_json::to_string_pretty(&config).unwrap(),
+        );
+        let bodies = Arc::new(Mutex::new(Vec::<Value>::new()));
+        let captured = bodies.clone();
+        let router = Router::new()
+            .route(
+                "/api/config/automation/config/evening_lights",
+                get(move || {
+                    let config = config.clone();
+                    async move { Json(config) }
+                }),
+            )
+            .route(
+                "/api/states",
+                get(|| async {
+                    Json(json!([{"entity_id":"automation.renamed","attributes":{"id":"evening_lights"}}]))
+                }),
+            )
+            .route(
+                "/api/services/automation/trigger",
+                route_post(move |Json(body): Json<Value>| {
+                    let captured = captured.clone();
+                    async move {
+                        captured.lock().unwrap().push(body);
+                        StatusCode::OK
+                    }
+                }),
+            );
+        let (origin, ha) = serve(router).await;
+        let (endpoint, mcp) = resource_endpoint(url::Url::parse(&origin).unwrap()).await;
+        let (_, response) = post(&endpoint, request("tools/call", "trigger", json!({"name":"execute","arguments":{"action":"automation.trigger","input":{"config_key":"evening_lights","expected_revision":revision,"confirm":true}}}))).await;
+        let result = &response["result"]["structuredContent"];
+        assert_eq!(result["acknowledged"], true);
+        assert_eq!(result["completion_verified"], false);
+        assert_eq!(result["effects_verified"], false);
+        assert_eq!(result["skip_conditions"], false);
+        assert_eq!(result["entity_id"], "automation.renamed");
+        assert_eq!(
+            *bodies.lock().unwrap(),
+            vec![json!({"entity_id":"automation.renamed","skip_condition":false})]
+        );
+        mcp.abort();
+        ha.abort();
+    }
+
     async fn endpoint_for_with_timeout(
         home_assistant_origin: url::Url,
         timeout: Duration,
@@ -3738,7 +3981,7 @@ mod tests {
         ] {
             assert!(serialized.contains(action), "missing {action}");
         }
-        assert_eq!(serialized.matches("additionalProperties").count(), 31);
+        assert_eq!(serialized.matches("additionalProperties").count(), 32);
         assert!(serialized.contains("\"additionalProperties\":false"));
         for forbidden in ["toggle", "confirmation", "preset", "source", "template"] {
             assert!(!serialized.contains(forbidden));
@@ -4207,6 +4450,7 @@ mod tests {
                     "automation.upsert",
                     "blueprint.save",
                     "automation.from_blueprint",
+                    "automation.trigger",
                     "smarthome_mcp.deploy",
                     "smarthome_mcp.setup",
                     "home_assistant.restart",

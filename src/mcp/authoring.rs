@@ -1,6 +1,5 @@
 use super::*;
 use crate::integrations::home_assistant::{Error, HomeAssistantClient, actions::*};
-use sha2::{Digest, Sha256};
 
 const ITEM_LIMIT: usize = 256 * 1024;
 
@@ -117,13 +116,7 @@ fn payload(name: &str, args: &serde_json::Value) -> ServerResult<serde_json::Val
 }
 
 fn digest(text: &str) -> String {
-    format!(
-        "sha256:{}",
-        Sha256::digest(text.as_bytes())
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>()
-    )
+    native_revision(text)
 }
 
 fn unique(text: &str, needle: &str) -> ServerResult<usize> {
