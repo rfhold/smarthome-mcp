@@ -204,6 +204,68 @@ fn public_action(tool: &str, action: &str) -> Option<(&'static str, String)> {
     }
 }
 
+fn public_input_metadata(schema: &mut serde_json::Value, private: &str, public: &str) {
+    if schema["title"] == format!("{private} input") {
+        schema["title"] = json!(format!("{public} input"));
+    }
+    if schema["description"] == format!("Use with action `{private}`.") {
+        schema["description"] = json!(format!("Use with action `{public}`."));
+    }
+    if let Some(parts) = schema
+        .get_mut("allOf")
+        .and_then(|value| value.as_array_mut())
+    {
+        for part in parts {
+            public_input_metadata(part, private, public);
+        }
+    }
+}
+
+fn public_input_schema(
+    name: &str,
+    tools: &[mcp::McpToolDefinition],
+) -> ServerResult<serde_json::Value> {
+    let invalid = || ServerError::internal("invalid generated action schema");
+    let mut actions = Vec::new();
+    let mut inputs = Vec::new();
+    let mut requests = Vec::new();
+    for tool in tools {
+        let branches = tool.input_schema["oneOf"].as_array().ok_or_else(invalid)?;
+        let discovery = tool.input_schema["properties"]["input"]["anyOf"]
+            .as_array()
+            .ok_or_else(invalid)?;
+        for branch in branches {
+            let action = branch["properties"]["action"]["const"]
+                .as_str()
+                .ok_or_else(invalid)?;
+            if let Some((target, public)) = public_action(&tool.name, action)
+                && target == name
+            {
+                let mut input = discovery
+                    .iter()
+                    .find(|input| input["title"] == format!("{action} input"))
+                    .ok_or_else(invalid)?
+                    .clone();
+                public_input_metadata(&mut input, action, &public);
+                let mut request = branch.clone();
+                request["properties"]["action"]["const"] = json!(public);
+                let bound_input = request["properties"].get_mut("input").ok_or_else(invalid)?;
+                public_input_metadata(bound_input, action, &public);
+                actions.push(public);
+                inputs.push(input);
+                requests.push(request);
+            }
+        }
+    }
+    Ok(
+        json!({"type":"object","additionalProperties":false,"required":["action"],"properties":{
+        "action":{"type":"string","enum":actions},
+        "input":{"description":"Action-specific input. See the request oneOf branch matching action.","anyOf":inputs},
+        "filter":{"type":["string","null"],"description":"Optional jq-compatible output filter."}
+    },"oneOf":requests}),
+    )
+}
+
 impl ResourceFirstMcp {
     async fn catalog_value(
         &self,
@@ -476,32 +538,7 @@ impl mcp::server::ServerHandler for ResourceFirstMcp {
             let private = this.0.list_tools(cursor, context).await?;
             let mut tools = Vec::new();
             for name in ["query", "execute"] {
-                let mut actions = Vec::new();
-                let mut inputs = Vec::new();
-                for tool in &private.tools {
-                    let old_actions = tool.input_schema["properties"]["action"]["enum"]
-                        .as_array()
-                        .unwrap();
-                    let old_inputs = tool.input_schema["properties"]["input"]["oneOf"]
-                        .as_array()
-                        .unwrap();
-                    for (action, input) in old_actions.iter().zip(old_inputs) {
-                        let action = action.as_str().unwrap();
-                        if let Some((target, public)) = public_action(&tool.name, action)
-                            && target == name
-                        {
-                            let mut input = input.clone();
-                            input["description"] = json!(format!("Use with action `{public}`."));
-                            actions.push(public.clone());
-                            inputs.push(input);
-                        }
-                    }
-                }
-                let schema = json!({"type":"object","additionalProperties":false,"required":["action"],"properties":{
-                    "action":{"type":"string","enum":actions},
-                    "input":{"oneOf":inputs},
-                    "filter":{"type":["string","null"],"description":"Optional jq-compatible output filter."}
-                }});
+                let schema = public_input_schema(name, &private.tools)?;
                 let mut tool = mcp::progressive::tool_definition(
                     name,
                     if name == "query" {
@@ -630,7 +667,7 @@ impl mcp::server::ServerHandler for ResourceFirstMcp {
 #[mcp::progressive_server(
     skills = self.catalog,
     name = "smarthome-mcp",
-    version = "0.2.2",
+    version = "0.2.3",
     description = "Authenticated, policy-bounded smart-home tools.",
     tool(
         name = "home_assistant_query",
@@ -1962,6 +1999,80 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn public_schema_remaps_action_bindings_independently_of_discovery_order() {
+        let mut schema = mcp::progressive::input_schema(
+            &["router.discover", "readiness.get"],
+            vec![
+                mcp::progressive::ActionInputSchema {
+                    action: "router.discover",
+                    schema: Some(
+                        json!({"type":"object","description":"Discovery window.","properties":{"seconds":{"type":"integer"}},"required":["seconds"]}),
+                    ),
+                },
+                mcp::progressive::ActionInputSchema {
+                    action: "readiness.get",
+                    schema: None,
+                },
+            ],
+        );
+        schema["properties"]["input"]["anyOf"]
+            .as_array_mut()
+            .unwrap()
+            .reverse();
+        schema["properties"]["action"]["enum"]
+            .as_array_mut()
+            .unwrap()
+            .reverse();
+        let tools = [mcp::progressive::tool_definition(
+            "thread_query",
+            "",
+            schema.clone(),
+        )];
+        let public = public_input_schema("query", &tools).unwrap();
+        for (index, action) in ["router.discover", "readiness.get"].into_iter().enumerate() {
+            let mut expected = schema["oneOf"][index].clone();
+            let name = format!("thread.{action}");
+            expected["properties"]["action"]["const"] = json!(name);
+            public_input_metadata(&mut expected["properties"]["input"], action, &name);
+            assert_eq!(public["oneOf"][index], expected);
+            assert_eq!(
+                public["properties"]["input"]["anyOf"][index]["title"],
+                format!("{name} input")
+            );
+        }
+        assert_eq!(public["oneOf"][0]["required"], json!(["action", "input"]));
+        assert_eq!(
+            public["oneOf"][0]["properties"]["input"]["allOf"][1],
+            json!({"not":{"type":"null"}})
+        );
+        assert_eq!(
+            public["properties"]["input"]["anyOf"][0]["description"],
+            "Discovery window."
+        );
+        assert_eq!(public["oneOf"][1]["required"], json!(["action"]));
+        assert_eq!(
+            public["properties"]["input"]["anyOf"][1]["description"],
+            "Use with action `thread.readiness.get`."
+        );
+    }
+
+    #[test]
+    fn public_schema_rejects_stale_or_missing_generated_metadata_without_panicking() {
+        for schema in [
+            json!({"properties":{"input":{"oneOf":[]}}}),
+            json!({"oneOf":[{}],"properties":{"input":{"anyOf":[]}}}),
+            json!({"oneOf":[{"properties":{"action":{"const":"readiness.get"},"input":{}}}],"properties":{"input":{"anyOf":[]}}}),
+        ] {
+            let tools = [mcp::progressive::tool_definition(
+                "thread_query",
+                "",
+                schema,
+            )];
+            assert!(public_input_schema("query", &tools).is_err());
+        }
+    }
+
     struct DropSignal(Arc<AtomicBool>, Arc<Notify>);
 
     #[derive(Clone)]
@@ -2048,6 +2159,28 @@ mod tests {
         let execute = &tools[1];
         assert_eq!(query["name"], "query");
         assert_eq!(execute["name"], "execute");
+        for tool in [query, execute] {
+            let schema = &tool["inputSchema"];
+            let actions = schema["properties"]["action"]["enum"].as_array().unwrap();
+            let requests = schema["oneOf"].as_array().unwrap();
+            let discovery = schema["properties"]["input"]["anyOf"].as_array().unwrap();
+            assert_eq!(actions.len(), requests.len());
+            assert_eq!(actions.len(), discovery.len());
+            for action in actions {
+                assert_eq!(
+                    requests
+                        .iter()
+                        .filter(|branch| branch["properties"]["action"]["const"] == *action)
+                        .count(),
+                    1
+                );
+                assert!(
+                    discovery.iter().any(
+                        |input| input["title"] == format!("{} input", action.as_str().unwrap())
+                    )
+                );
+            }
+        }
         assert_eq!(
             query["inputSchema"]["properties"]["action"]["enum"]
                 .as_array()
@@ -3981,8 +4114,20 @@ mod tests {
         ] {
             assert!(serialized.contains(action), "missing {action}");
         }
-        assert_eq!(serialized.matches("additionalProperties").count(), 32);
-        assert!(serialized.contains("\"additionalProperties\":false"));
+        assert_eq!(schema["additionalProperties"], false);
+        let inputs = schema["properties"]["input"]["anyOf"].as_array().unwrap();
+        let requests = schema["oneOf"].as_array().unwrap();
+        assert_eq!(inputs.len(), 31);
+        assert_eq!(requests.len(), inputs.len());
+        for input in inputs {
+            assert_eq!(input["additionalProperties"], false);
+        }
+        for request in requests {
+            assert_eq!(
+                request["properties"]["input"]["allOf"][0]["additionalProperties"],
+                false
+            );
+        }
         for forbidden in ["toggle", "confirmation", "preset", "source", "template"] {
             assert!(!serialized.contains(forbidden));
         }

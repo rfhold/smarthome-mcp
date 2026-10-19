@@ -72,7 +72,7 @@ Mock transport coverage proves repository behavior without contacting a live hou
 The local suite and required live evidence are governed by the [component deployment contract](../home-assistant/spec/component-deployment.md):
 
 - `smarthome_mcp.deploy` accepts only exact `confirm: true` and returns bounded operation metadata;
-- component files and manifest version equal package version `0.2.2` at build time;
+- component files and manifest version equal package version `0.2.3` at build time;
 - the caller cannot select a host, port, user, path, repository, version, bytes, credential, or command;
 - Ed25519 host identity is pinned before password authentication and only SFTP is requested;
 - inspection rejects unknown nodes, modes, names, depth, entry count, file size, total size, and ambiguous transaction state;
