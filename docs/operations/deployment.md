@@ -15,7 +15,7 @@ Bounded public smoke checks returned HTTP 200 from `/health` and `/ready`. An un
 
 `infra/pulumi/` defines both stacks with Pulumi TypeScript and Bun. Stack files contain no image, Home Assistant token, or other deployment secret.
 
-Both stacks declare the administrator-confirmed SSH target `172.16.1.10:2200`, username `root`, config root `/homeassistant`, and egress CIDR `172.16.1.10/32`. This does not install the component or authorize a Home Assistant restart. Production does not add a private CIMD origin or broader network exception.
+Both stacks declare the administrator-confirmed SSH target `172.16.1.10:2200`, username `root`, config root `/homeassistant`, and egress CIDR `172.16.1.10/32`. This does not install the component or authorize a Home Assistant restart. Preview trusts only `https://preview-waltr.holdenitdown.net` for private CIMD; production trusts only `https://waltr.holdenitdown.net`. Neither stack adds a broader network exception.
 
 ## Declared Resources
 
@@ -38,7 +38,7 @@ The Deployment runs as UID and GID 65532. It disables service-account token moun
 
 `Dockerfile` uses Rust 1.96 and a Debian bookworm runtime. The final image contains the optimized application binary and CA certificates, runs as UID/GID 65532, and has OCI source and revision labels. Kubernetes owns health checks.
 
-Cargo uses CLI Git for the exact private Kuri revision. BuildKit supplies Git configuration and credentials through secret mounts; those credentials must not enter layers or logs.
+Cargo uses CLI Git for private Waltr tag `v0.3.1` and its exact lockfile SHA. BuildKit supplies Git configuration and credentials through secret mounts; those credentials must not enter layers or logs.
 
 ## Credential Boundaries
 

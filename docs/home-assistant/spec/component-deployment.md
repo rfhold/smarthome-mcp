@@ -16,7 +16,7 @@ The Boolean must be exactly `true`; unknown fields, strings, and false values fa
 
 ## Fixed Authority
 
-The caller cannot select a host, port, username, config root, path, repository, version, bytes, SSH command, or credential. The preview declaration fixes `172.16.1.10:2200`, user `root`, and config root `/homeassistant`. This canonical physical directory avoids trusting the `/config` symlink while preserving the deployer's symlink rejection. Component files are exact compile-time bytes from `custom_components/smarthome_mcp/`; their manifest version must equal the MCP package version, currently `0.2.3`.
+The caller cannot select a host, port, username, config root, path, repository, version, bytes, SSH command, or credential. The preview declaration fixes `172.16.1.10:2200`, user `root`, and config root `/homeassistant`. This canonical physical directory avoids trusting the `/config` symlink while preserving the deployer's symlink rejection. Component files are exact compile-time bytes from `custom_components/smarthome_mcp/`; their manifest version must equal the MCP package version, currently `0.2.4`.
 
 The native Rust client accepts only an independently seeded Ed25519 host public key, compares it before password authentication, and then requests only the SFTP subsystem. It does not use a shell, TOFU, an SSH agent, ambient SSH configuration, caller input, or a generic filesystem interface.
 
@@ -28,10 +28,10 @@ The deployer inspects only bounded regular files and directories under `/homeass
 
 | Existing state | Result |
 | --- | --- |
-| Component absent | Stage and install embedded `0.2.3`. |
-| Recognized lower SemVer | Stage and update to embedded `0.2.3`; report the prior version. |
-| Version `0.2.3` with exact files and SHA-256 content | No-op without mutation. |
-| Version `0.2.3` with any drift | Reject as unsafe. |
+| Component absent | Stage and install embedded `0.2.4`. |
+| Recognized lower SemVer | Stage and update to embedded `0.2.4`; report the prior version. |
+| Version `0.2.4` with exact files and SHA-256 content | No-op without mutation. |
+| Version `0.2.4` with any drift | Reject as unsafe. |
 | Newer version, invalid version, or unrecognized tree | Reject as unsafe; never downgrade or overwrite. |
 
 ## Transaction And Recovery

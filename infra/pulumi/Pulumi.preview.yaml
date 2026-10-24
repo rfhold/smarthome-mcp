@@ -22,7 +22,7 @@ config:
   smarthome-mcp:mcpOAuthRefreshFamilyTtl: "2592000"
   smarthome-mcp:mcpOAuthCodeTtl: "300"
   smarthome-mcp:mcpOAuthCimdTrustedPrivateOrigins:
-    - https://preview-kuri.holdenitdown.net
+    - https://preview-waltr.holdenitdown.net
   smarthome-mcp:mcpOAuthWrappingKeyVersions: [v1]
   smarthome-mcp:mcpOAuthActiveWrappingKeyVersion: v1
 encryptionsalt: v1:JpursO2VfUY=:v1:b36ZTkbO7H7FZE0d:kQRTPgYHEdvYZTV5kFmLRAlYatccPg==

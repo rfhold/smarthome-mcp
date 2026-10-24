@@ -2,7 +2,7 @@
 
 These documents describe deployment declarations, current pipeline behavior, private component deployment, and operator validation.
 
-The runtime uses the reviewed immutable Kuri Git revision, and the container and pipeline declarations can resolve it. The production release pipeline promotes exact preview digests; production deployment requires separate authority and protected credential bootstrap.
+The runtime uses Waltr tag `v0.3.1` with an exact lockfile SHA. Container and pipeline declarations retain private Git credential support. The production release pipeline promotes exact preview digests; production deployment requires separate authority and protected credential bootstrap.
 
 | Document | Covers |
 | --- | --- |

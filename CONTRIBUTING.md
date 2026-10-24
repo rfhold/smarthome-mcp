@@ -1,6 +1,6 @@
 # Contributing
 
-The repository implements hosted OAuth, authenticated MCP, resource-first smart-home reads, and create/edit/query/execute tools. Authoring uses existing Home Assistant APIs under a single-writer assumption, with best-effort revision and absence checks rather than atomic compare-and-swap. No Core patch is required. The generic Kuri `mcp` dependency uses a reviewed immutable Git revision.
+The repository implements hosted OAuth, authenticated MCP, resource-first smart-home reads, and create/edit/query/execute tools. Authoring uses existing Home Assistant APIs under a single-writer assumption, with best-effort revision and absence checks rather than atomic compare-and-swap. No Core patch is required. The generic Waltr `mcp` dependency uses tag `v0.3.1`, locked to `8dd2a558be902d976d1d6ed34b389afd37fc2a08`. Its crate version is `0.3.0`.
 
 Blueprint and private component deployment have local implementation and test evidence. Keep that evidence separate from unverified live compatibility, installation, SSH/SFTP deployment, and external behavior.
 
@@ -19,7 +19,7 @@ cargo +1.96.0 clippy --locked --all-targets --all-features -- -D warnings
 cargo +1.96.0 test --locked --all-features
 ```
 
-These commands pass against the exact Kuri Git pin.
+These commands previously passed against Kuri revision `8193f120e5581ae0c46eaf9e1ce69a10a7b0b875`. That historical evidence does not validate Waltr; rerun the commands against the current lockfile.
 
 Run Home Assistant integration checks with the locked Python environment:
 
@@ -50,7 +50,7 @@ Run Pulumi type checks and mock tests:
 
 ```bash
 cd infra/pulumi
-bun install --frozen-lockfile
+bun install --frozen-lockfile --ignore-scripts
 bun run build
 bun test index.test.ts
 ```

@@ -21,6 +21,8 @@ config:
   smarthome-mcp:mcpOAuthRefreshTokenTtl: "86400"
   smarthome-mcp:mcpOAuthRefreshFamilyTtl: "2592000"
   smarthome-mcp:mcpOAuthCodeTtl: "300"
+  smarthome-mcp:mcpOAuthCimdTrustedPrivateOrigins:
+    - https://waltr.holdenitdown.net
   smarthome-mcp:mcpOAuthWrappingKeyVersions: [v1]
   smarthome-mcp:mcpOAuthActiveWrappingKeyVersion: v1
 encryptionsalt: v1:fIjtsgeazsQ=:v1:LHkgKsoC2To5QJ9j:lb3s2CCIYFbNFol+BYaLzfwSHZ2s3g==

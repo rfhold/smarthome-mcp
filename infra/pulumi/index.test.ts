@@ -53,7 +53,7 @@ before(async () => {
     "smarthome-mcp:mcpOAuthRefreshFamilyTtl": "2592000",
     "smarthome-mcp:mcpOAuthCodeTtl": "300",
     "smarthome-mcp:mcpOAuthCimdTrustedPrivateOrigins":
-      '["https://kuri.internal.example"]',
+      '["https://waltr.internal.example"]',
     "smarthome-mcp:mcpOAuthWrappingKeyVersions": '["v1"]',
     "smarthome-mcp:mcpOAuthActiveWrappingKeyVersion": "v1",
   });
@@ -396,7 +396,7 @@ describe("standalone resource topology", () => {
     assert.equal(app.SMARTHOME_MCP_OAUTH_ALLOW_CIMD, "true");
     assert.equal(
       app.SMARTHOME_MCP_OAUTH_CIMD_TRUSTED_PRIVATE_ORIGINS,
-      "https://kuri.internal.example",
+      "https://waltr.internal.example",
     );
     assert.equal(app.SMARTHOME_MCP_OAUTH_ALLOW_LOOPBACK_REDIRECTS, "true");
     assert.equal(
@@ -736,6 +736,18 @@ describe("standalone resource topology", () => {
     );
     assert.match(pipeline, /name: pulumi-credentials/);
     assert.match(pipeline, /name: authentik-credentials/);
+  });
+
+  test("trusts only the environment-specific Waltr CIMD origin", () => {
+    for (const [stack, origin] of [
+      ["preview", "https://preview-waltr.holdenitdown.net"],
+      ["prod", "https://waltr.holdenitdown.net"],
+    ] as const) {
+      const origins = stackFile(stack).match(
+        /smarthome-mcp:mcpOAuthCimdTrustedPrivateOrigins:\n((?:    - .*\n)+)/,
+      );
+      assert.equal(origins?.[1], `    - ${origin}\n`, stack);
+    }
   });
 
   test("removes obsolete release and OpenBao source", () => {

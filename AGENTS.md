@@ -20,7 +20,7 @@
 - The public runtime has create/edit/query/execute, dynamic smarthome:// resources, and five MCP Skills. Authoring uses existing native APIs under a single-writer assumption; revision and absence checks are best-effort, not atomic. Private adapter names are not public aliases. Never retry an unknown mutation outcome. See docs/home-assistant/spec/resource-first.md.
 - Local implementation and tests do not establish live Home Assistant compatibility, component deployment, installation, or external-operation evidence.
 - The repository is intentionally unlicensed; do not add a license or claim an open-source license.
-- Keep the Kuri `mcp` dependency pinned to a reviewed immutable Git revision before delivery.
+- Keep the Waltr `mcp` dependency on a reviewed release tag with its exact Git SHA in `Cargo.lock`.
 - Deployment declarations exist; do not claim live validation without recorded evidence.
 - Use Rust 1.96 or the documented container fallback for Rust commands.
 - Use `agentic-documentation` for documentation or `AGENTS.md` changes.

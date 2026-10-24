@@ -10,6 +10,6 @@ After authorization, the action calls only fixed `GET /api/camera_proxy/{entity_
 
 The response must use exactly `image/jpeg`, `image/png`, or `image/webp`. The decoded bytes must match the declared format signature and must not exceed 4 MiB. A MIME or signature mismatch produces `invalid_response`; an oversized image produces `response_too_large`.
 
-The MCP result contains short text, one image content block with canonical padded standard Base64, and bounded metadata. Metadata does not duplicate image bytes. The decoded image limit leaves the complete result below Kuri Agent's 8 MiB MCP transport limit. The shared 2 MiB normalized JSON output limit remains unchanged.
+The MCP result contains short text, one image content block with canonical padded standard Base64, and bounded metadata. Metadata does not duplicate image bytes. The decoded image limit originally targeted Kuri Agent's 8 MiB MCP transport budget. That historical client constraint does not establish a Waltr transport limit. The shared 2 MiB normalized JSON output limit remains unchanged.
 
 The action uses the existing `home_assistant_query` tool and `mcp:use` OAuth scope. It uses the [shared four-permit admission and 20-second deadline](common.md).

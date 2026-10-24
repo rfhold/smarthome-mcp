@@ -6,7 +6,7 @@ This document defines the implemented hosted OAuth contract. Local tests cover s
 
 The service uses generic MCP-owned OIDC resource-owner support and PostgreSQL state. Generic migration V4 adds one-shot OIDC attempts and replaces the removed browser-state migration.
 
-The service uses a reviewed immutable Kuri Git revision. Live PostgreSQL and Authentik validation is deployment evidence, not established by local tests.
+The service uses Waltr tag `v0.3.1`, locked to `8dd2a558be902d976d1d6ed34b389afd37fc2a08`. Live PostgreSQL and Authentik validation is deployment evidence, not established by local tests.
 
 ## Protocol Boundary
 
@@ -27,7 +27,7 @@ Authentik provides browser identity only. Authentik access tokens, ID tokens, an
 | Actor | Role |
 | --- | --- |
 | MCP client | Discover metadata, identify or register itself, complete authorization, and call `/mcp`. |
-| Generic Kuri `mcp` | Host OAuth metadata, OIDC resource-owner flow, token issuance, token validation, continuation, and durable OAuth state. |
+| Generic Waltr `mcp` | Host OAuth metadata, OIDC resource-owner flow, token issuance, token validation, continuation, and durable OAuth state. |
 | `smarthome-mcp` | Configure Authentik and map stable issuer-plus-subject identities to local principals. |
 | Authentik | Authenticate the browser user during the hosted authorization flow. |
 | PostgreSQL | Persist generic OAuth and OIDC state plus protected signing material in the `mcp` schema. |
@@ -58,7 +58,7 @@ Authorization Code flows must require PKCE S256. The authorization request and i
 
 ## OIDC Resource Owner
 
-Generic Kuri `mcp` owns the strict login and callback flow. It creates an expiring, one-shot OIDC transaction before redirecting to Authentik.
+Generic Waltr `mcp` owns the strict login and callback flow. It creates an expiring, one-shot OIDC transaction before redirecting to Authentik.
 
 The generic flow owns state, nonce, upstream PKCE, ID-token verification, the identity-mapper seam, and hosted authorization continuation.
 
@@ -102,13 +102,13 @@ OAuth authorization requests must use the exact resource. Token exchange and ref
 
 ## Durable State and Key Protection
 
-Generic Kuri migrations V1 through V3 own the hosted OAuth schema, signing keys, and client registration state. Migration V4 adds one-shot OIDC attempts with parent transaction cascades.
+Generic Waltr migrations V1 through V3 own the hosted OAuth schema, signing keys, and client registration state. Migration V4 adds one-shot OIDC attempts with parent transaction cascades.
 
 The generic dependency embeds and applies all four migrations in the `mcp` schema. No separate browser-state migration exists.
 
 The issuer must persist ES256 signing material in encrypted form. A versioned wrapping-key file must encrypt and decrypt that material outside PostgreSQL.
 
-Retired signing keys must remain available for verification for at least the access-token lifetime plus Kuri's 30-second clock skew. The 3-day access-token policy therefore requires 259230 seconds of verification overlap; shorter access-token policies retain Kuri's longer default overlap.
+Retired signing keys must remain available for verification for at least the access-token lifetime plus Waltr's 30-second clock skew. The 3-day access-token policy therefore requires 259230 seconds of verification overlap; shorter access-token policies retain Waltr's longer default overlap.
 
 The deployment must mount the wrapping key separately from database credentials. Loss of either boundary alone must not expose a usable signing key.
 

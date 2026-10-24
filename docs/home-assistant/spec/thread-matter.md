@@ -151,7 +151,7 @@ The server discards the complete Home Assistant response. It returns only `actio
 
 The `/mcp` endpoint requires the endpoint-wide `mcp:use` OAuth scope. That scope authorizes all six progressive tools.
 
-Kuri's current server context provides no per-tool diagnostic or administrator scope. A valid `mcp:use` token therefore grants access to Thread selection and Matter interview actions.
+Waltr's current server context provides no per-tool diagnostic or administrator scope. A valid `mcp:use` token therefore grants access to Thread selection and Matter interview actions.
 
 This design is a current security limitation and trust decision. Per-tool privilege separation requires a separate OAuth or endpoint architecture change.
 

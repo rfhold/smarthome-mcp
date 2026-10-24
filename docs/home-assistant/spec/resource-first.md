@@ -68,4 +68,4 @@ Discovery always exposes `create` and `edit`. They use existing native config GE
 
 Mutation responses include `accepted: true`, `reload_complete: false`, and the single-writer/best-effort metadata. Native persistence acknowledgment is not reload completion, activation, or future execution evidence. Validation errors are generic and do not echo private input. Conflicts and existing identifiers fail before writing. Once dispatch may have happened, timeout, cancellation, connection failure, unexpected errors, or malformed acknowledgments return nonretryable `mutation_outcome_unknown`. The service never retries writes; read before making a new explicitly authorized decision. Cancellation is not rollback.
 
-Local mocks do not establish live compatibility, integration installation, external operations, or deployment. The published immutable Kuri MCP dependency remains unchanged.
+Local mocks do not establish live compatibility, integration installation, external operations, or deployment. The Waltr MCP dependency uses tag `v0.3.1` and an exact lockfile SHA. Public action boundaries remain unchanged.

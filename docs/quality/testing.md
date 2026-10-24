@@ -2,7 +2,7 @@
 
 ## Status
 
-The local Rust and Pulumi suites pass under Rust 1.96 and Bun. They provide unit, generated MCP transport, normalization, configuration, hosted-auth seam, component deployment, and mocked infrastructure evidence. Recorded preview evidence covers an earlier multi-architecture image, Pulumi apply, ready workload, healthy PostgreSQL cluster, and public health, readiness, MCP challenge, and metadata smoke checks.
+Earlier local Rust and Pulumi suites passed under Rust 1.96 and Bun with the prior Kuri dependency. That evidence does not validate the current Waltr dependency. They provide unit, generated MCP transport, normalization, configuration, hosted-auth seam, component deployment, and mocked infrastructure evidence. Recorded preview evidence covers an earlier multi-architecture image, Pulumi apply, ready workload, healthy PostgreSQL cluster, and public health, readiness, MCP challenge, and metadata smoke checks.
 
 Local implementation and tests cover blueprint and component deployment schemas, routing, bounds, state checks, privacy, custom integration behavior, embedded source bytes, shared versions, and transaction recovery. They do not prove a live SSH/SFTP connection, Home Assistant compatibility, component installation or load, network-policy enforcement, restart, setup, or external behavior.
 
@@ -20,7 +20,7 @@ cargo +1.96.0 test --locked --all-features
 Run infrastructure checks from `infra/pulumi`:
 
 ```bash
-bun install --frozen-lockfile
+bun install --frozen-lockfile --ignore-scripts
 bun run build
 bun test
 ```
@@ -72,7 +72,7 @@ Mock transport coverage proves repository behavior without contacting a live hou
 The local suite and required live evidence are governed by the [component deployment contract](../home-assistant/spec/component-deployment.md):
 
 - `smarthome_mcp.deploy` accepts only exact `confirm: true` and returns bounded operation metadata;
-- component files and manifest version equal package version `0.2.3` at build time;
+- component files and manifest version equal package version `0.2.4` at build time;
 - the caller cannot select a host, port, user, path, repository, version, bytes, credential, or command;
 - Ed25519 host identity is pinned before password authentication and only SFTP is requested;
 - inspection rejects unknown nodes, modes, names, depth, entry count, file size, total size, and ambiguous transaction state;

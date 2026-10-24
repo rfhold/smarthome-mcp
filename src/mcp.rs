@@ -144,64 +144,244 @@ const RESOURCE_CATALOGS: &[(&str, &str, &str, &str, &str)] = &[
     ),
 ];
 
-fn public_action(tool: &str, action: &str) -> Option<(&'static str, String)> {
-    match tool {
-        "home_assistant_query" if matches!(action, "history.get" | "automation.validate") => {
-            Some(("query", action.into()))
-        }
-        "thread_query" if matches!(action, "router.discover" | "readiness.get") => {
-            Some(("query", format!("thread.{action}")))
-        }
-        "matter_query"
-            if matches!(
-                action,
-                "readiness.get" | "device.diagnostics" | "device.ping"
-            ) =>
-        {
-            Some(("query", format!("matter.{action}")))
-        }
-        "home_assistant_exec"
-            if matches!(
-                action,
-                "scene.activate"
-                    | "automation.trigger"
-                    | "smarthome_mcp.deploy"
-                    | "smarthome_mcp.setup"
-                    | "home_assistant.restart"
-                    | "light.turn_on"
-                    | "light.turn_off"
-                    | "switch.turn_on"
-                    | "switch.turn_off"
-                    | "fan.turn_on"
-                    | "fan.turn_off"
-                    | "fan.set_percentage"
-                    | "cover.open"
-                    | "cover.close"
-                    | "cover.stop"
-                    | "cover.set_position"
-                    | "climate.turn_on"
-                    | "climate.turn_off"
-                    | "climate.set_temperature"
-                    | "media_player.turn_on"
-                    | "media_player.turn_off"
-                    | "media_player.play"
-                    | "media_player.pause"
-                    | "media_player.stop"
-                    | "media_player.volume_set"
-                    | "lock.lock"
-                    | "lock.unlock"
-            ) =>
-        {
-            Some(("execute", action.into()))
-        }
-        "thread_exec" if matches!(action, "network.set_preferred" | "router.set_preferred") => {
-            Some(("execute", format!("thread.{action}")))
-        }
-        "matter_exec" if action == "device.interview" => {
-            Some(("execute", format!("matter.{action}")))
-        }
-        _ => None,
-    }
+const PUBLIC_ACTIONS: &[(&str, &str, &str, &str)] = &[
+    (
+        "home_assistant_query",
+        "history.get",
+        "query",
+        "history.get",
+    ),
+    (
+        "home_assistant_query",
+        "automation.validate",
+        "query",
+        "automation.validate",
+    ),
+    (
+        "thread_query",
+        "router.discover",
+        "query",
+        "thread.router.discover",
+    ),
+    (
+        "thread_query",
+        "readiness.get",
+        "query",
+        "thread.readiness.get",
+    ),
+    (
+        "matter_query",
+        "readiness.get",
+        "query",
+        "matter.readiness.get",
+    ),
+    (
+        "matter_query",
+        "device.diagnostics",
+        "query",
+        "matter.device.diagnostics",
+    ),
+    ("matter_query", "device.ping", "query", "matter.device.ping"),
+    (
+        "home_assistant_exec",
+        "scene.activate",
+        "execute",
+        "scene.activate",
+    ),
+    (
+        "home_assistant_exec",
+        "automation.trigger",
+        "execute",
+        "automation.trigger",
+    ),
+    (
+        "home_assistant_exec",
+        "smarthome_mcp.deploy",
+        "execute",
+        "smarthome_mcp.deploy",
+    ),
+    (
+        "home_assistant_exec",
+        "smarthome_mcp.setup",
+        "execute",
+        "smarthome_mcp.setup",
+    ),
+    (
+        "home_assistant_exec",
+        "home_assistant.restart",
+        "execute",
+        "home_assistant.restart",
+    ),
+    (
+        "home_assistant_exec",
+        "light.turn_on",
+        "execute",
+        "light.turn_on",
+    ),
+    (
+        "home_assistant_exec",
+        "light.turn_off",
+        "execute",
+        "light.turn_off",
+    ),
+    (
+        "home_assistant_exec",
+        "switch.turn_on",
+        "execute",
+        "switch.turn_on",
+    ),
+    (
+        "home_assistant_exec",
+        "switch.turn_off",
+        "execute",
+        "switch.turn_off",
+    ),
+    (
+        "home_assistant_exec",
+        "fan.turn_on",
+        "execute",
+        "fan.turn_on",
+    ),
+    (
+        "home_assistant_exec",
+        "fan.turn_off",
+        "execute",
+        "fan.turn_off",
+    ),
+    (
+        "home_assistant_exec",
+        "fan.set_percentage",
+        "execute",
+        "fan.set_percentage",
+    ),
+    ("home_assistant_exec", "cover.open", "execute", "cover.open"),
+    (
+        "home_assistant_exec",
+        "cover.close",
+        "execute",
+        "cover.close",
+    ),
+    ("home_assistant_exec", "cover.stop", "execute", "cover.stop"),
+    (
+        "home_assistant_exec",
+        "cover.set_position",
+        "execute",
+        "cover.set_position",
+    ),
+    (
+        "home_assistant_exec",
+        "climate.turn_on",
+        "execute",
+        "climate.turn_on",
+    ),
+    (
+        "home_assistant_exec",
+        "climate.turn_off",
+        "execute",
+        "climate.turn_off",
+    ),
+    (
+        "home_assistant_exec",
+        "climate.set_temperature",
+        "execute",
+        "climate.set_temperature",
+    ),
+    (
+        "home_assistant_exec",
+        "media_player.turn_on",
+        "execute",
+        "media_player.turn_on",
+    ),
+    (
+        "home_assistant_exec",
+        "media_player.turn_off",
+        "execute",
+        "media_player.turn_off",
+    ),
+    (
+        "home_assistant_exec",
+        "media_player.play",
+        "execute",
+        "media_player.play",
+    ),
+    (
+        "home_assistant_exec",
+        "media_player.pause",
+        "execute",
+        "media_player.pause",
+    ),
+    (
+        "home_assistant_exec",
+        "media_player.stop",
+        "execute",
+        "media_player.stop",
+    ),
+    (
+        "home_assistant_exec",
+        "media_player.volume_set",
+        "execute",
+        "media_player.volume_set",
+    ),
+    ("home_assistant_exec", "lock.lock", "execute", "lock.lock"),
+    (
+        "home_assistant_exec",
+        "lock.unlock",
+        "execute",
+        "lock.unlock",
+    ),
+    (
+        "thread_exec",
+        "network.set_preferred",
+        "execute",
+        "thread.network.set_preferred",
+    ),
+    (
+        "thread_exec",
+        "router.set_preferred",
+        "execute",
+        "thread.router.set_preferred",
+    ),
+    (
+        "matter_exec",
+        "device.interview",
+        "execute",
+        "matter.device.interview",
+    ),
+];
+
+fn public_action(tool: &str, action: &str) -> Option<(&'static str, &'static str)> {
+    PUBLIC_ACTIONS
+        .iter()
+        .find_map(|&(private_tool, private_action, target, public)| {
+            (tool == private_tool && action == private_action).then_some((target, public))
+        })
+}
+
+fn public_action_input(
+    branch: &serde_json::Value,
+    public: &'static str,
+) -> ServerResult<mcp::progressive::ActionInputSchema> {
+    let required = branch["required"]
+        .as_array()
+        .ok_or_else(|| ServerError::internal("invalid private action schema"))?;
+    let schema = if required.iter().any(|field| field == "input") {
+        let mut schema = branch["properties"]["input"]["allOf"]
+            .as_array()
+            .and_then(|parts| parts.first())
+            .cloned()
+            .ok_or_else(|| ServerError::internal("missing private input schema"))?;
+        let private = branch["properties"]["action"]["const"]
+            .as_str()
+            .ok_or_else(|| ServerError::internal("missing private action schema"))?;
+        public_input_metadata(&mut schema, private, public);
+        Some(schema)
+    } else {
+        None
+    };
+    Ok(mcp::progressive::ActionInputSchema {
+        action: public,
+        schema,
+    })
 }
 
 fn public_input_metadata(schema: &mut serde_json::Value, private: &str, public: &str) {
@@ -228,7 +408,6 @@ fn public_input_schema(
     let invalid = || ServerError::internal("invalid generated action schema");
     let mut actions = Vec::new();
     let mut inputs = Vec::new();
-    let mut requests = Vec::new();
     for tool in tools {
         let branches = tool.input_schema["oneOf"].as_array().ok_or_else(invalid)?;
         let discovery = tool.input_schema["properties"]["input"]["anyOf"]
@@ -241,29 +420,16 @@ fn public_input_schema(
             if let Some((target, public)) = public_action(&tool.name, action)
                 && target == name
             {
-                let mut input = discovery
+                discovery
                     .iter()
                     .find(|input| input["title"] == format!("{action} input"))
-                    .ok_or_else(invalid)?
-                    .clone();
-                public_input_metadata(&mut input, action, &public);
-                let mut request = branch.clone();
-                request["properties"]["action"]["const"] = json!(public);
-                let bound_input = request["properties"].get_mut("input").ok_or_else(invalid)?;
-                public_input_metadata(bound_input, action, &public);
+                    .ok_or_else(invalid)?;
                 actions.push(public);
-                inputs.push(input);
-                requests.push(request);
+                inputs.push(public_action_input(branch, public)?);
             }
         }
     }
-    Ok(
-        json!({"type":"object","additionalProperties":false,"required":["action"],"properties":{
-        "action":{"type":"string","enum":actions},
-        "input":{"description":"Action-specific input. See the request oneOf branch matching action.","anyOf":inputs},
-        "filter":{"type":["string","null"],"description":"Optional jq-compatible output filter."}
-    },"oneOf":requests}),
-    )
+    Ok(mcp::progressive::input_schema(&actions, inputs))
 }
 
 impl ResourceFirstMcp {
@@ -667,7 +833,7 @@ impl mcp::server::ServerHandler for ResourceFirstMcp {
 #[mcp::progressive_server(
     skills = self.catalog,
     name = "smarthome-mcp",
-    version = "0.2.3",
+    version = "0.2.4",
     description = "Authenticated, policy-bounded smart-home tools.",
     tool(
         name = "home_assistant_query",
@@ -2146,6 +2312,145 @@ mod tests {
         ));
         let (origin, task) = serve(mcp::server::streamable_http_router(handler)).await;
         (format!("{origin}/mcp"), task)
+    }
+
+    #[test]
+    fn public_action_schemas_preserve_required_and_no_input_contracts() {
+        use mcp::progressive::{ActionInputSchema, input_schema};
+
+        let private = input_schema(
+            &["required", "empty"],
+            vec![
+                ActionInputSchema {
+                    action: "required",
+                    schema: Some(json!({"type":"object","additionalProperties":false,
+                        "required":["confirm"],"properties":{"confirm":{"const":true}}})),
+                },
+                ActionInputSchema {
+                    action: "empty",
+                    schema: None,
+                },
+            ],
+        );
+        let required = public_action_input(&private["oneOf"][0], "public.required").unwrap();
+        let empty = public_action_input(&private["oneOf"][1], "public.empty").unwrap();
+        assert!(required.schema.is_some());
+        assert!(empty.schema.is_none());
+        let public = input_schema(&["public.required", "public.empty"], vec![required, empty]);
+        assert_eq!(public["oneOf"][0]["required"], json!(["action", "input"]));
+        assert_eq!(
+            public["oneOf"][0]["properties"]["action"]["const"],
+            "public.required"
+        );
+        assert_eq!(
+            public["oneOf"][0]["properties"]["input"]["allOf"][1],
+            json!({"not":{"type":"null"}})
+        );
+        assert_eq!(
+            public["oneOf"][0]["properties"]["input"]["allOf"][0]["properties"]["confirm"],
+            json!({"const":true})
+        );
+        assert_eq!(public["oneOf"][1]["required"], json!(["action"]));
+        assert_eq!(
+            public["oneOf"][1]["properties"]["input"]["anyOf"],
+            json!([
+                {"type":"null"}, {"type":"object","maxProperties":0}
+            ])
+        );
+        for input in [None, Some(Value::Null), Some(json!({}))] {
+            assert!(mcp::progressive::ensure_no_action_input("public.empty", input).is_ok());
+        }
+        for input in [json!({"confirm":true}), json!([]), json!(false)] {
+            assert!(mcp::progressive::ensure_no_action_input("public.empty", Some(input)).is_err());
+        }
+        assert!(public_action_input(&json!({}), "broken").is_err());
+    }
+
+    #[tokio::test]
+    async fn resource_first_action_inputs_are_correlated_and_required() {
+        let (endpoint, task) =
+            resource_endpoint(url::Url::parse("http://127.0.0.1:1/").unwrap()).await;
+        let (_, discovery) = post(&endpoint, request("tools/list", "schemas", json!({}))).await;
+        for tool in discovery["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .take(2)
+        {
+            let schema = &tool["inputSchema"];
+            let actions = schema["properties"]["action"]["enum"].as_array().unwrap();
+            let branches = schema["oneOf"].as_array().unwrap();
+            assert_eq!(branches.len(), actions.len());
+            assert_eq!(
+                schema["properties"]["input"]["anyOf"]
+                    .as_array()
+                    .unwrap()
+                    .len(),
+                actions.len()
+            );
+            for action in actions {
+                let matching: Vec<_> = branches
+                    .iter()
+                    .filter(|branch| branch["properties"]["action"]["const"] == *action)
+                    .collect();
+                assert_eq!(matching.len(), 1);
+                assert_eq!(matching[0]["required"], json!(["action", "input"]));
+                assert_eq!(
+                    matching[0]["properties"]["input"]["allOf"][1],
+                    json!({"not":{"type":"null"}})
+                );
+            }
+        }
+        for (name, arguments) in [
+            ("query", json!({"action":"history.get"})),
+            ("query", json!({"action":"history.get","input":null})),
+            (
+                "query",
+                json!({"action":"history.get","input":{"confirm":true}}),
+            ),
+            (
+                "query",
+                json!({"action":"home_assistant.restart","input":{"confirm":true}}),
+            ),
+            (
+                "execute",
+                json!({"action":"home_assistant.restart","input":{"entity_id":"light.test"}}),
+            ),
+            ("execute", json!({"action":"smarthome_mcp.setup"})),
+            (
+                "execute",
+                json!({"action":"smarthome_mcp.setup","input":null}),
+            ),
+            (
+                "execute",
+                json!({"action":"smarthome_mcp.setup","input":{"unexpected":true}}),
+            ),
+        ] {
+            let (_, response) = post(
+                &endpoint,
+                request(
+                    "tools/call",
+                    "invalid",
+                    json!({"name":name,"arguments":arguments}),
+                ),
+            )
+            .await;
+            assert_eq!(response["error"]["code"], -32602, "{response}");
+        }
+        let (_, response) = post(
+            &endpoint,
+            request(
+                "tools/call",
+                "empty-object",
+                json!({"name":"execute","arguments":{"action":"smarthome_mcp.setup","input":{}}}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            response["result"]["structuredContent"]["error"]["code"],
+            "upstream_unavailable"
+        );
+        task.abort();
     }
 
     #[tokio::test]
@@ -4114,17 +4419,23 @@ mod tests {
         ] {
             assert!(serialized.contains(action), "missing {action}");
         }
-        assert_eq!(schema["additionalProperties"], false);
+        let actions = schema["properties"]["action"]["enum"].as_array().unwrap();
         let inputs = schema["properties"]["input"]["anyOf"].as_array().unwrap();
-        let requests = schema["oneOf"].as_array().unwrap();
+        let branches = schema["oneOf"].as_array().unwrap();
         assert_eq!(inputs.len(), 31);
-        assert_eq!(requests.len(), inputs.len());
+        assert_eq!(inputs.len(), actions.len());
+        assert_eq!(branches.len(), actions.len());
+        assert_eq!(schema["additionalProperties"], false);
         for input in inputs {
-            assert_eq!(input["additionalProperties"], false);
+            assert_eq!(input["additionalProperties"], false, "{input}");
         }
-        for request in requests {
+        for action in actions {
+            let branch = branches
+                .iter()
+                .find(|branch| branch["properties"]["action"]["const"] == *action)
+                .unwrap();
             assert_eq!(
-                request["properties"]["input"]["allOf"][0]["additionalProperties"],
+                branch["properties"]["input"]["allOf"][0]["additionalProperties"],
                 false
             );
         }

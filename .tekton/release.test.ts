@@ -124,7 +124,7 @@ describe("release declaration", () => {
     expect(deploy.taskSpec.steps[0].script).toContain('pulumi up --stack prod --yes --skip-preview --config "image=$APP_IMAGE"');
   });
 
-  test("confirmed prod SSH settings preserve narrower auth and storage policy", () => {
+  test("confirmed prod SSH settings preserve exact auth and storage policy", () => {
     const prod = Bun.YAML.parse(readFileSync(join(root, "infra/pulumi/Pulumi.prod.yaml"), "utf8")) as { config: Record<string, unknown> };
     const expected = {
       homeAssistantSshHost: "172.16.1.10", homeAssistantSshPort: "2200",
@@ -133,7 +133,9 @@ describe("release declaration", () => {
       protectData: "true", databaseStorageSize: "20Gi", backupRetention: "30d",
     };
     for (const [key, value] of Object.entries(expected)) expect(prod.config[`smarthome-mcp:${key}`]).toBe(value);
-    expect(prod.config["smarthome-mcp:mcpOAuthCimdTrustedPrivateOrigins"]).toBeUndefined();
+    expect(prod.config["smarthome-mcp:mcpOAuthCimdTrustedPrivateOrigins"]).toEqual([
+      "https://waltr.holdenitdown.net",
+    ]);
   });
 });
 
