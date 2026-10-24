@@ -1969,7 +1969,7 @@ wheels = [
 
 [[package]]
 name = "smarthome-mcp-home-assistant"
-version = "0.2.4"
+version = "0.2.5"
 source = { virtual = "." }
 
 [package.dev-dependencies]
