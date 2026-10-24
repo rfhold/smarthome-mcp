@@ -86,7 +86,7 @@ Prerequisites in the PipelineRun namespace:
 - Secret `smarthome-mcp-release-trusted-signers`, key `signing-key.asc`, containing only approved OpenPGP public signing keys. Missing trust material fails closed; private signing keys never enter CI.
 - Existing `pulumi-credentials`, `authentik-credentials`, and `tekton-cluster-kubeconfig`.
 - The `prod` stack and its protected Home Assistant URL, token, SSH password, and independently verified Ed25519 host-key Stash outputs, seeded through a separately authorized operator bootstrap before running a release. No credential is copied from preview by the pipeline.
-- A successful preview build for the exact release commit, retained at its SHA alias, and availability of the pinned Git, Crane, and general CI images. The CI image must supply Bun `1.3.5` and Pulumi `v3.253.0`.
+- A successful preview build for the exact release commit, retained at its SHA alias, and availability of the pinned third-party CI images. Only maintained CI images under `cr.holdenitdown.net/rfhold/` use `latest` with `imagePullPolicy: Always`. The general CI image must supply Bun `1.3.5` and Pulumi `v3.253.0`, as required by the release checks. Application promotion and deployment still use verified immutable digests.
 
 Prepare the aligned version change on `main`, wait for its preview pipeline to succeed, then create and publish a signed annotated stable tag only with explicit tag/push authority. Pipeline execution authorizes service deployment, not component installation, Home Assistant restart, setup, or device actions. Recovery retries the same tag and immutable digest; a different digest at an existing release alias requires investigation rather than overwrite.
 

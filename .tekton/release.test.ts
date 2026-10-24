@@ -67,7 +67,7 @@ function manifestFixture(scenario: string) {
 }
 
 describe("release declaration", () => {
-  test("stages pinned crane into the pinned jq execution image on amd64", () => {
+  test("stages pinned crane into the latest jq execution image on amd64", () => {
     const promotion = task("promote-release");
     expect(promotion.taskSpec.volumes).toEqual([{ name: "crane-tool", emptyDir: {} }]);
     const [stage, verify] = promotion.taskSpec.steps;
@@ -75,7 +75,7 @@ describe("release declaration", () => {
     expect(stage.image).toBe("gcr.io/go-containerregistry/crane:debug@sha256:54b27703e6c602fbd6f95712910e9c8d45d4361a59274bde38aeec943734e424");
     expect(stage.script).toContain("cp /ko-app/crane /tools/crane");
     expect(stage.volumeMounts).toEqual([{ name: "crane-tool", mountPath: "/tools" }]);
-    expect(verify.image).toBe("cr.holdenitdown.net/rfhold/general-ci@sha256:6943f91d774980357b24730a14ac4b026325d50962df4b2e15e24c3f43190e5b");
+    expect(verify.image).toBe("cr.holdenitdown.net/rfhold/general-ci:latest");
     expect(verify.volumeMounts).toEqual([{ name: "crane-tool", mountPath: "/tools", readOnly: true }]);
     expect(verify.script).toContain('export PATH="/tools:$PATH"');
     expect(verify.script).toContain("crane version");
