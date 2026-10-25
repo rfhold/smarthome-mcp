@@ -13,6 +13,7 @@ interface Step {
 }
 interface Task {
   name: string;
+  taskRef?: { name: string };
   runAfter?: string[];
   params?: { name: string; value: string }[];
   taskSpec: {
@@ -37,8 +38,6 @@ const task = (name: string): Task => {
   return found;
 };
 const revision = "a".repeat(40);
-const digest = `sha256:${"b".repeat(64)}`;
-const image = `cr.holdenitdown.net/rfhold/smarthome-mcp@${digest}`;
 
 function configFixture(scenario: string, arch: string) {
   const config = { os: "linux", architecture: arch, config: { User: "65532:65532", Labels: { "org.opencontainers.image.revision": revision } } };
@@ -53,7 +52,7 @@ function configFixture(scenario: string, arch: string) {
 }
 
 function manifestFixture(scenario: string) {
-  const manifest: any = { manifests: ["amd64", "arm64"].map((architecture) => ({ platform: { architecture, os: "linux" } })) };
+  const manifest: any = { schemaVersion: 2, mediaType: "application/vnd.oci.image.index.v1+json", manifests: ["amd64", "arm64"].map((architecture) => descriptor(scenario, architecture)) };
   if (scenario === "single") return '{"architecture":"amd64"}';
   if (scenario === "missing-arm64") manifest.manifests.pop();
   if (scenario === "nested-platform") {
@@ -66,23 +65,97 @@ function manifestFixture(scenario: string) {
   return json + (scenario === "malformed-manifest" ? " invalid" : scenario === "multiple-manifest" ? json : "");
 }
 
+const sharedTasks = process.env.SHARED_TASKS_DIR ?? join(import.meta.dir, "../../homelab/src/components/tekton-tasks");
+const sharedPromotion = (Bun.YAML.parse(readFileSync(join(sharedTasks, "service-promote-v1.yaml"), "utf8")) as any).spec.steps[0].script;
+function hash(text: string) { return `sha256:${new Bun.CryptoHasher("sha256").update(text).digest("hex")}`; }
+const configType = "application/vnd.oci.image.config.v1+json";
+const manifestType = "application/vnd.oci.image.manifest.v1+json";
+function platformFixture(scenario: string, arch: string) {
+  const config = configFixture(scenario, arch);
+  return JSON.stringify({ schemaVersion: 2, mediaType: manifestType, config: { mediaType: configType, digest: hash(config), size: Buffer.byteLength(config) }, layers: [] });
+}
+function descriptor(scenario: string, architecture: string) {
+  const manifest = platformFixture(scenario, architecture);
+  return { mediaType: manifestType, digest: hash(manifest), size: Buffer.byteLength(manifest), platform: { architecture, os: "linux" } };
+}
+
+const digest = hash(manifestFixture("absent"));
+const image = `cr.holdenitdown.net/rfhold/smarthome-mcp@${digest}`;
+
+function promote(scenario: string, overrides: Record<string, string> = {}) {
+  const directory = mkdtempSync(join(tmpdir(), "shared-release-test-"));
+  try {
+    const output = join(directory, "images");
+    const calls = join(directory, "calls");
+    const scriptPath = join(directory, "promote.ts");
+    const repository = JSON.parse(task("promote-release").params!.find((p: any) => p.name === "images").value)[0].repository;
+    const objects: Record<string, string> = {};
+    for (const arch of ["amd64", "arm64"]) {
+      const config = configFixture(scenario, arch), manifest = platformFixture(scenario, arch);
+      objects[`blobs/${hash(config)}`] = config;
+      objects[`manifests/${hash(manifest)}`] = manifest;
+    }
+    const index = manifestFixture(scenario);
+    objects[`manifests/${revision}`] = index;
+    const harness = `
+import { appendFileSync } from "node:fs";
+const objects = ${JSON.stringify(objects)};
+const index = ${JSON.stringify(index)};
+let copied = false;
+globalThis.fetch = async (url, options = {}) => {
+  const key = String(url).split("/v2/")[1].split("/").slice(2).join("/");
+  const method = options.method || "GET";
+  appendFileSync(process.env.CALLS, method + " " + key + "\\n");
+  const scenario = process.env.SCENARIO;
+  const response = (body, status = 200, headers = {}) => new Response(body, { status, headers });
+  const missing = () => response(JSON.stringify({ errors: [{ code: "MANIFEST_UNKNOWN" }] }), 404);
+  if (method === "PUT") {
+    if (scenario === "copy-failure") return response("failed", 500);
+    copied = true; return response("", 201);
+  }
+  if (key === "manifests/" + process.env.REVISION) {
+    if (["missing-preview", "preview-missing"].includes(scenario)) return missing();
+    if (scenario === "transport-unavailable") throw Error("unavailable");
+    if (["bad-digest", "malformed"].includes(scenario)) return response(index, 200, { "docker-content-digest": "sha256:bad" });
+  }
+  if (key.startsWith("manifests/v")) {
+    if (copied && scenario === "changed-after-copy") return response(index + " ", 200);
+    if (["existing-different", "conflict"].includes(scenario)) return response(index + " ", 200);
+    if (["auth", "unauthorized"].includes(scenario)) return response("unauthorized", 403);
+    if (["network", "timeout"].includes(scenario)) throw Error("timeout");
+    if (["generic-404", "notfound"].includes(scenario)) return response("404 Not Found", 404);
+    if (scenario === "nameunknown") return response(JSON.stringify({ errors: [{ code: "NAME_UNKNOWN" }] }), 404);
+    if (copied || ["existing-same", "same"].includes(scenario)) return response(index);
+    return missing();
+  }
+  return objects[key] === undefined ? missing() : response(objects[key]);
+};
+`;
+    writeFileSync(scriptPath, harness + sharedPromotion.replace(/^#!.*\n/, ""));
+    writeFileSync(calls, "");
+    const result = Bun.spawnSync([process.execPath, scriptPath], {
+      env: { ...process.env, DOCKER_CONFIG: directory, REVISION: revision, VERSION: overrides.RELEASE_TAG ?? "v0.1.0", IMAGES: JSON.stringify([{ key: "image", repository, platforms: ["amd64", "arm64"], user: "65532:65532" }]), IMAGES_RESULT: output, SCENARIO: scenario, CALLS: calls },
+    });
+    const value = existsSync(output) ? JSON.parse(readFileSync(output, "utf8")).image : undefined;
+    return { status: result.exitCode, error: result.stderr.toString(), calls: readFileSync(calls, "utf8"), image: value, result: value ?? "" };
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+}
+
 describe("release declaration", () => {
-  test("stages pinned crane into the latest jq execution image on amd64", () => {
+  test("delegates metadata verification and promotion to the installed shared Task", () => {
     const promotion = task("promote-release");
-    expect(promotion.taskSpec.volumes).toEqual([{ name: "crane-tool", emptyDir: {} }]);
-    const [stage, verify] = promotion.taskSpec.steps;
-    expect(stage.name).toBe("stage-crane");
-    expect(stage.image).toBe("gcr.io/go-containerregistry/crane:debug@sha256:54b27703e6c602fbd6f95712910e9c8d45d4361a59274bde38aeec943734e424");
-    expect(stage.script).toContain("cp /ko-app/crane /tools/crane");
-    expect(stage.volumeMounts).toEqual([{ name: "crane-tool", mountPath: "/tools" }]);
-    expect(verify.image).toBe("cr.holdenitdown.net/rfhold/general-ci:latest");
-    expect(verify.volumeMounts).toEqual([{ name: "crane-tool", mountPath: "/tools", readOnly: true }]);
-    expect(verify.script).toContain('export PATH="/tools:$PATH"');
-    expect(verify.script).toContain("crane version");
-    expect(pipeline.spec.taskRunSpecs.find((entry) => entry.pipelineTaskName === "promote-release")?.podTemplate.nodeSelector).toEqual({ "kubernetes.io/arch": "amd64" });
+    expect((promotion as any).taskRef).toEqual({ name: "service-promote-v1" });
+    expect(promotion.taskSpec).toBeUndefined();
+    expect(promotion.params).toEqual([
+      { name: "revision", value: "$(params.revision)" },
+      { name: "version", value: "$(tasks.validate-release.results.tag)" },
+      { name: "images", value: JSON.stringify([{ key: "image", repository: "cr.holdenitdown.net/rfhold/smarthome-mcp", platforms: ["amd64", "arm64"], user: "65532:65532" }]) },
+    ]);
   });
   test("all inline shell scripts parse", () => {
-    for (const item of tasks) for (const step of item.taskSpec.steps) {
+    for (const item of tasks) for (const step of (item.taskSpec?.steps ?? [])) {
       expect(Bun.spawnSync(["/bin/sh", "-n", "-c", step.script]).exitCode).toBe(0);
     }
   });
@@ -114,14 +187,13 @@ describe("release declaration", () => {
   test("prod deploy consumes promotion result with normal credentials only", () => {
     const deploy = task("deploy-production");
     expect(deploy.runAfter).toEqual(["promote-release"]);
-    expect(deploy.params).toEqual([{ name: "image", value: "$(tasks.promote-release.results.image)" }]);
-    expect(deploy.taskSpec.steps[0].envFrom).toEqual([
-      { secretRef: { name: "pulumi-credentials" } },
-      { secretRef: { name: "authentik-credentials" } },
-    ]);
-    expect(deploy.taskSpec.volumes?.[0].secret?.secretName).toBe("tekton-cluster-kubeconfig");
-    expect(deploy.taskSpec.steps[0].script).toContain('pulumi preview --stack prod --diff --config "image=$APP_IMAGE"');
-    expect(deploy.taskSpec.steps[0].script).toContain('pulumi up --stack prod --yes --skip-preview --config "image=$APP_IMAGE"');
+    expect((deploy as any).taskRef).toEqual({ name: "service-pulumi-up-v1" });
+    expect(deploy.taskSpec).toBeUndefined();
+    expect(Object.fromEntries(deploy.params!.map((param: any) => [param.name, param.value]))).toEqual({
+      "source-subdir": "infra/pulumi", stack: "prod", "image-config": "$(tasks.promote-release.results.images)",
+      "authentik-enabled": "true", "grafana-enabled": "false", "openbao-enabled": "false",
+    });
+    expect(yaml).not.toMatch(/pulumi preview|openbao-pulumi|openbao-login|VAULT_TOKEN|serviceAccountName:/);
   });
 
   test("confirmed prod SSH settings preserve exact auth and storage policy", () => {
@@ -169,75 +241,21 @@ describe("version gate execution", () => {
   });
 });
 
-function promote(scenario: string): { status: number; calls: string; result: string } {
-  const directory = mkdtempSync(join(tmpdir(), "smarthome-release-test-"));
-  try {
-    writeFileSync(join(directory, "crane"), `#!/bin/sh
-set -eu
-printf '%s\\n' "$*" >> "$CALLS"
-case "$1" in
-  version) [ "$SCENARIO" != crane-unavailable ] || exit 1; printf 'fixture crane\n' ;;
-  digest)
-    case "$2" in
-      *:preview-*)
-        if [ "$SCENARIO" = preview-missing ]; then echo MANIFEST_UNKNOWN >&2; exit 1; fi
-        if [ "$SCENARIO" = malformed ]; then echo sha256:bad; else echo "$DIGEST"; fi ;;
-      *)
-        if [ -f "$COPIED" ]; then echo "$DIGEST"; exit; fi
-        case "$SCENARIO" in
-          absent) echo 'MANIFEST_UNKNOWN: manifest unknown' >&2; exit 1 ;;
-          conflict) echo sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc ;;
-          unauthorized) echo 'UNAUTHORIZED: authentication required' >&2; exit 1 ;;
-          timeout) echo 'dial tcp: i/o timeout' >&2; exit 1 ;;
-          notfound) echo '404 Not Found' >&2; exit 1 ;;
-          nameunknown) echo 'NAME_UNKNOWN: repository unknown' >&2; exit 1 ;;
-          *) echo "$DIGEST" ;;
-        esac ;;
-    esac ;;
-  manifest)
-    printf '%s' "$MANIFEST_JSON" ;;
-  config)
-    case "$3" in
-      linux/amd64) printf '%s' "$CONFIG_AMD64" ;;
-      linux/arm64) printf '%s' "$CONFIG_ARM64" ;;
-      *) exit 1 ;;
-    esac ;;
-  copy) touch "$COPIED" ;;
-  *) exit 1 ;;
-esac
-`, { mode: 0o755 });
-    const resultPath = join(directory, "image");
-    const callsPath = join(directory, "calls");
-    const script = task("promote-release").taskSpec.steps[1].script.replace("$(results.image.path)", resultPath);
-    const result = Bun.spawnSync(["/bin/sh", "-c", script], {
-      env: { ...process.env, PATH: `${directory}:${process.env.PATH}`, SCENARIO: scenario,
-        REVISION: revision, RELEASE_TAG: "v0.2.0", DIGEST: digest,
-        MANIFEST_JSON: manifestFixture(scenario), CONFIG_AMD64: configFixture(scenario, "amd64"), CONFIG_ARM64: configFixture(scenario, "arm64"),
-        CALLS: callsPath, COPIED: join(directory, "copied") },
-    });
-    const calls = readFileSync(callsPath, "utf8");
-    let output = "";
-    if (existsSync(resultPath)) output = readFileSync(resultPath, "utf8");
-    return { status: result.exitCode, calls, result: output };
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
 
-describe("promotion shell regression with local registry stub", () => {
+describe("shared promotion regression with local registry stub", () => {
   for (const scenario of ["absent", "same"]) test(scenario, () => {
     const result = promote(scenario);
-    expect(result.status).toBe(0);
+    expect(result.status, result.error).toBe(0);
     expect(result.result).toBe(image);
-    expect(result.calls).toContain(`config --platform linux/amd64 ${image}`);
-    expect(result.calls).toContain(`config --platform linux/arm64 ${image}`);
-    if (scenario === "absent") expect(result.calls).toContain(`copy ${image} cr.holdenitdown.net/rfhold/smarthome-mcp:v0.2.0`);
-    else expect(result.calls).not.toContain("copy ");
+    expect(result.calls).toContain(`GET manifests/${descriptor("absent", "amd64").digest}`);
+    expect(result.calls).toContain(`GET manifests/${descriptor("absent", "arm64").digest}`);
+    if (scenario === "absent") expect(result.calls).toContain(`PUT manifests/v0.1.0`);
+    else expect(result.calls).not.toContain("PUT ");
   });
-  for (const scenario of ["crane-unavailable", "preview-missing", "malformed", "single", "missing-arm64", "root", "wrong-revision", "wrong-os", "wrong-architecture", "nested-root", "nested-wrong-revision", "nested-wrong-os", "nested-wrong-architecture", "malformed-config", "multiple-config", "nested-platform", "wrong-platform-os", "manifest-not-array", "malformed-manifest", "multiple-manifest", "conflict", "unauthorized", "timeout", "notfound", "nameunknown"]) test(scenario, () => {
+  for (const scenario of ["transport-unavailable", "preview-missing", "malformed", "single", "missing-arm64", "root", "wrong-revision", "wrong-os", "wrong-architecture", "nested-root", "nested-wrong-revision", "nested-wrong-os", "nested-wrong-architecture", "malformed-config", "multiple-config", "nested-platform", "wrong-platform-os", "manifest-not-array", "malformed-manifest", "multiple-manifest", "conflict", "unauthorized", "timeout", "notfound", "nameunknown"]) test(scenario, () => {
     const result = promote(scenario);
     expect(result.status).not.toBe(0);
-    expect(result.calls).not.toContain("copy ");
+    expect(result.calls).not.toContain("PUT ");
     expect(result.result).toBe("");
   });
 });

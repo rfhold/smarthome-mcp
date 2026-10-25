@@ -65,20 +65,25 @@ The pipeline:
 
 1. checks out the exact requested revision;
 2. scans tracked build and deployment inputs for private key patterns;
-3. builds amd64 and arm64 images with BuildKit secret mounts;
-4. creates a multi-architecture manifest;
-5. resolves an immutable digest and verifies runtime UID and OCI revision; and
-6. runs `pulumi preview` and `pulumi up` for `preview` using the previously seeded protected Stash outputs.
+3. invokes `service-build-v1` independently for amd64 and arm64 after the scan, with native builders and a read-only Secret workspace for private Git credentials;
+4. passes the immutable build results, ordered amd64 then arm64, to `service-manifest-v1` for metadata verification and the joined index; and
+5. passes that immutable index to `service-pulumi-up-v1` for a frozen dependency install and direct `pulumi up --stack preview --yes --skip-preview` using the previously seeded protected Stash outputs.
 
-The Pulumi step requires `pulumi-credentials`, `authentik-credentials`, and `tekton-cluster-kubeconfig` in the PipelineRun namespace. It does not require Home Assistant credentials there.
+The builds publish `<full-SHA>-amd64` and `<full-SHA>-arm64` aliases; the joined index uses `<full-SHA>`, without a `preview-` prefix. Deployment uses only the immutable result. There are no test, lint, or separate Pulumi preview tasks in the deployment DAG; local test suites remain available.
+
+The four shared Tasks (`service-build-v1`, `service-manifest-v1`, `service-promote-v1`, and `service-pulumi-up-v1`) must be installed in `pipelines-as-code` from the homelab repository through a separately approved installation before these workflows can run. These declarations do not install them.
+
+The Pulumi Task requires `pulumi-credentials`, `authentik-credentials`, and `tekton-cluster-kubeconfig` in the PipelineRun namespace. Authentik is enabled; Grafana and OpenBao are disabled. It uses the existing non-admin pipeline identity and does not require Home Assistant credentials there.
+
+A failed or cancelled PipelineRun does not prove rollback or the absence of external effects. Completed architecture, commit, or release image publications and Pulumi changes can remain. Remote BuildKit work can continue or finish after cancellation; confirm its status separately. Before an authorized retry, inspect registry aliases and immutable digests with target-specific read authority. Separately inspect remote BuildKit status and Pulumi stack pending operations and current resources under appropriate authority. Retries, deployments, and rollbacks each require appropriate target-specific authority; the workflow promises no automatic rollback.
 
 ## Production Release
 
 `.tekton/smarthome-mcp-release.yaml` handles push events for stable tags `vMAJOR.MINOR.PATCH`, without leading zeroes, prereleases, or build metadata. Release tags must be OpenPGP-signed annotated tags. The pipeline checks the tag commit against the event SHA and detached checkout, verifies its signature using only the provisioned trust keyring, requires ancestry on fetched `main`, and checks the tag version against `Cargo.toml`, `pyproject.toml`, and `custom_components/smarthome_mcp/manifest.json`. A private-material scan gates promotion as well.
 
-Promotion requires the existing `cr.holdenitdown.net/rfhold/smarthome-mcp:preview-<full-SHA>` multi-architecture image. It resolves that image once to a digest, verifies Linux amd64 and arm64 configurations, runtime user `65532:65532`, and the exact OCI revision on both platforms. It never rebuilds or substitutes another preview. An absent preview, malformed digest, or failed verification stops the release.
+The shared `service-promote-v1` Task requires the existing `cr.holdenitdown.net/rfhold/smarthome-mcp:<full-SHA>` multi-architecture index and the validated stable tag. It resolves that image once to a digest, verifies Linux amd64 and arm64 configurations, runtime user `65532:65532`, and the exact OCI revision on both platforms. It never rebuilds or substitutes another preview. An absent preview, malformed digest, or failed verification stops the release.
 
-The `vMAJOR.MINOR.PATCH` image alias must be absent or already point to that same digest. Only an explicit registry `MANIFEST_UNKNOWN` response permits creating the alias; authorization, transport, generic HTTP 404, and other errors fail closed. An existing different digest fails. The pipeline copies from the immutable digest and verifies the resulting alias, then passes only `repository@sha256:...` to the normal `prod` Pulumi preview and update. Concurrent writers are not locked by this check: operators must serialize releases and protect release aliases from overwrite.
+The `vMAJOR.MINOR.PATCH` image alias must be absent or already point to that same digest. Only an explicit registry `MANIFEST_UNKNOWN` response permits creating the alias; authorization, transport, generic HTTP 404, and other errors fail closed. An existing different digest fails. The pipeline copies from the immutable digest and verifies the resulting alias, then passes the shared promotion result map (`image`) containing only `repository@sha256:...` to `service-pulumi-up-v1` for direct `prod` update with `--skip-preview`. CI does not run a separate Pulumi preview. Concurrent writers are not locked by this check: operators must serialize releases and protect release aliases from overwrite.
 
 Prerequisites in the PipelineRun namespace:
 
@@ -90,7 +95,7 @@ Prerequisites in the PipelineRun namespace:
 
 Prepare the aligned version change on `main`, wait for its preview pipeline to succeed, then create and publish a signed annotated stable tag only with explicit tag/push authority. Pipeline execution authorizes service deployment, not component installation, Home Assistant restart, setup, or device actions. Recovery retries the same tag and immutable digest; a different digest at an existing release alias requires investigation rather than overwrite.
 
-Run `bun test ./.tekton/release.test.ts` from the repository root for local YAML, gate, version-alignment, and stubbed-registry promotion regressions. These tests perform no registry or production actions and do not prove live signature tooling, registry access, or deployment readiness.
+Run `bun test ./.tekton/release.test.ts` from the repository root for local YAML, caller wiring, gate, version-alignment, and shared-Task promotion regressions with a mocked registry. The tests read `service-promote-v1.yaml` from the sibling `homelab/src/components/tekton-tasks` checkout by default; set `SHARED_TASKS_DIR` to another reviewed local Task directory if needed. These tests perform no registry or production actions and do not prove live signature tooling, registry access, or deployment readiness.
 
 ## Runtime Contract
 

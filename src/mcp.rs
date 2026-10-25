@@ -833,7 +833,7 @@ impl mcp::server::ServerHandler for ResourceFirstMcp {
 #[mcp::progressive_server(
     skills = self.catalog,
     name = "smarthome-mcp",
-    version = "0.2.5",
+    version = "0.2.6",
     description = "Authenticated, policy-bounded smart-home tools.",
     tool(
         name = "home_assistant_query",
