@@ -59,6 +59,8 @@ Runtime surfaces follow the [exposure and data-safety contract](../architecture/
 
 ## Preview Pipeline
 
+The service workflows use `pipelinesascode.tekton.dev/task` to import and inline only their referenced shared Tasks from immutable Homelab commit `db8891ad3b9467db8ff15d80bb931e01c2af2e0d`. Installing a cluster Task does not automatically resolve a named `taskRef` during Pipelines as Code processing. Shared Task updates require an explicit consumer pin update and separately approved Task installation before execution; source or cluster availability alone does not prove run health.
+
 `.tekton/smarthome-mcp-preview.yaml` targets `main` push and incoming events. It has one implemented preview path.
 
 The pipeline:
