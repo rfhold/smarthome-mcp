@@ -4,15 +4,21 @@
     "smarthome": {
       "type": "remote",
       "url": "https://smarthome-mcp.holdenitdown.net/mcp",
+      "protocol": "2026-07-28",
+      "pool": true,
       "enabled": true
     },
     "smarthome-local": {
       "type": "remote",
+      "protocol": "2026-07-28",
+      "pool": true,
       "url": "http://127.0.0.1:14334/mcp",
       "enabled": false
     },
     "smarthome-preview": {
       "type": "remote",
+      "protocol": "2026-07-28",
+      "pool": true,
       "url": "https://preview-smarthome-mcp.holdenitdown.net/mcp",
       "enabled": false
     }
